@@ -1,5 +1,8 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 from backend.config import settings
+import logging
+
+logger = logging.getLogger(__name__)
 
 MONGO_URL = settings.MONGODB_URL
 DB_NAME = settings.DB_NAME
@@ -15,14 +18,16 @@ async def connect_to_mongo():
     db.db = db.client[DB_NAME]
     
     # Create Indexes
-    await db.db.designs.create_index([("user_id", 1)])
-    await db.db.designs.create_index([("created_at", -1)])
-    await db.db.users.create_index([("email", 1)], unique=True)
     try:
+        await db.db.designs.create_index([("user_id", 1)])
+        await db.db.designs.create_index([("created_at", -1)])
+        await db.db.users.create_index([("email", 1)], unique=True)
         await db.db.jobs.create_index([("user_id", 1)])
         await db.db.jobs.create_index([("created_at", -1)])
-    except:
-        pass
+        print("Database indexes created successfully")
+    except Exception as e:
+        logger.error(f"Failed to create database indexes: {e}")
+        print(f"WARNING: Database index creation failed: {e}")
         
     print(f"Connected to MongoDB at {MONGO_URL}")
 

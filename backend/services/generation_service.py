@@ -4,6 +4,9 @@ import json
 import logging
 import asyncio
 import random
+import csv
+from typing import Dict, Optional, Any
+import uuid
 
 # Add project root to path to allow importing engine
 # Add project root and engine to path
@@ -23,7 +26,7 @@ class GenerationService:
     def __init__(self):
         self.architect = ProximityLayoutGenerator()
 
-    async def generate_layout(self, prompt: str):
+    async def generate_layout(self, prompt: str) -> Dict[str, Any]:
         try:
             # Run blocking ML code in a thread executor
             loop = asyncio.get_event_loop()
@@ -323,8 +326,10 @@ class GenerationService:
                     if not file_exists:
                         writer.writeheader()
                     writer.writerow(row)
-            except IOError:
-                print("Could not write to CSV - file might be open")
+            except IOError as e:
+                logger.warning(f"Could not write to CSV at {csv_path}: {e}. File might be locked or inaccessible.")
+            except Exception as e:
+                logger.error(f"Unexpected error writing to CSV: {e}")
                 
         # Return extra stats for frontend
         return {
@@ -335,7 +340,7 @@ class GenerationService:
             "average": avg_score
         }
 
-    def _serialize_layout(self, data):
+    def _serialize_layout(self, data: Any) -> Any:
         """Recursively convert Shapely objects to GeoJSON-like dicts"""
         from shapely.geometry import Polygon, Point, MultiPolygon, LineString, MultiLineString
         

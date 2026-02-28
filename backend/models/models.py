@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from bson import ObjectId
 from enum import Enum
+from backend.config import settings
 
 class PyObjectId(ObjectId):
     @classmethod
@@ -39,7 +40,7 @@ class DesignBase(BaseModel):
     }
 
 class DesignCreate(BaseModel):
-    prompt: str
+    prompt: str = Field(..., min_length=1, max_length=settings.MAX_PROMPT_LENGTH, description="Design prompt (max 5000 characters)")
 
 class DesignResponse(DesignBase):
     id: str = Field(alias="_id")

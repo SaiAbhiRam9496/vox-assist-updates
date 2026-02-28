@@ -50,7 +50,13 @@ def _place_adjacent(base_poly, width, height, existing_polys, preferred_sides=No
     Priority:
     1. Matches preferred_sides (if provided).
     2. MAXIMIZES shared perimeter with ALL existing polys (Gap Filling / Corner Logic).
+    3. Respects maximum footprint bounds (prevents sprawling layouts).
     """
+    # Safety check: prevent infinite sprawl
+    MAX_DIMENSION = 100.0  # Maximum room dimension in meters
+    if width > MAX_DIMENSION or height > MAX_DIMENSION:
+        return None
+    
     minx, miny, maxx, maxy = base_poly.bounds
     
     all_placements = {

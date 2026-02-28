@@ -7,6 +7,9 @@ from backend.utils.rate_limit import limiter
 from datetime import datetime
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -221,7 +224,8 @@ async def generate_blueprint(request: Request):
         try:
             img_data = base64.b64decode(screenshot_b64.split(",")[1])
             screenshot_img = mpimg.imread(io.BytesIO(img_data), format='png')
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to decode screenshot: {e}")
             pass
 
     # ── Reconstruct room polygons for 2D floorplan ──
@@ -240,7 +244,8 @@ async def generate_blueprint(request: Request):
                         poly = Polygon(coords[0])
                     if poly and not poly.is_empty:
                         rooms[room_name] = poly
-            except Exception:
+            except Exception as e:
+                logging.warning(f"Failed to reconstruct room {room_name}: {e}")
                 continue
 
     # Reconstruct doors
@@ -265,7 +270,8 @@ async def generate_blueprint(request: Request):
                         else:
                             polys.append(Polygon(ring[0]))
                     doors = uu([p for p in polys if p and not p.is_empty])
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to reconstruct doors: {e}")
             doors = None
 
     entrance = None
@@ -278,7 +284,8 @@ async def generate_blueprint(request: Request):
                     entrance = Polygon(coords)
                 else:
                     entrance = Polygon(coords[0])
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to reconstruct entrance: {e}")
             entrance = None
 
     # ── Compose branded PDF ──

@@ -1,5 +1,6 @@
 import re
 import json
+from typing import List, Dict, Tuple, Optional, Set
 
 class ProximityLayoutGenerator:
     def __init__(self):
@@ -43,7 +44,7 @@ class ProximityLayoutGenerator:
         # Will hold metadata from the last parsed prompt
         self.last_metadata = None
 
-    def _extract_total_area(self, text):
+    def _extract_total_area(self, text: str) -> int:
         """Extract total area without modifying text."""
         # Extended patterns to catch "900 sqft", "900 sq. ft.", "900m2", etc.
         patterns = [
@@ -64,7 +65,7 @@ class ProximityLayoutGenerator:
             
         return 150  # Default 150 sqm (~1600 sqft)
 
-    def _detect_units(self, text):
+    def _detect_units(self, text: str) -> Optional[str]:
         """Detect if text implies sqft or sqm. Default to sqft if ambiguous high numbers."""
         if re.search(r'(?:sqm|m2|meters)', text, re.IGNORECASE):
             return 'sqm'
@@ -72,7 +73,7 @@ class ProximityLayoutGenerator:
             return 'sqft'
         return None
 
-    def _find_room_mentions(self, text):
+    def _find_room_mentions(self, text: str) -> List[Dict[str, any]]:
         """Find all room mentions with canonical type and position, merging duplicates."""
         mentions = []
         for canonical, synonyms in self.synonym_map.items():
@@ -105,15 +106,21 @@ class ProximityLayoutGenerator:
             unique_mentions.append(curr)
             
         # --- REFERENCE FILTERING ---
-        # Remvoe mentions that are just references (e.g. "connected to the kitchen")
+        # Remove mentions that are just references (e.g. "connected to the kitchen")
         # preventing duplicates and area stealing.
         final_mentions = []
-        connection_pattern = re.compile(r'(connected|attached|access|leads?|next)\s+to\s+(the\s+|a\s+|an\s+)?$', re.IGNORECASE)
+        connection_pattern = re.compile(r'(connected|attached|access|leads?|next|has)\s+to\s+(the\s+|a\s+|an\s+)?', re.IGNORECASE)
         
         for m in unique_mentions:
             start = m['start']
-            # Look at preceding text matches
-        return unique_mentions
+            # Check if this mention is preceded by a connection word
+            context_before = text[max(0, start - 50):start]
+            if connection_pattern.search(context_before):
+                # This is a reference, skip it
+                continue
+            final_mentions.append(m)
+        
+        return final_mentions
 
     def _get_local_context(self, text, pos, window=30):
         """Get substring around a position."""
@@ -293,7 +300,7 @@ class ProximityLayoutGenerator:
 
         return total_area, explicit_rooms, used_area, excluded_types
 
-    def generate_blueprint(self, prompt):
+    def generate_blueprint(self, prompt: str) -> List[Dict[str, any]]:
         print(f"\n--- PROMPT: \"{prompt}\" ---")
         total_area, room_list, used_area, excluded_types = self.parse_natural_language(prompt)
         # Expose basic metadata for external consumers (e.g., CSV export)

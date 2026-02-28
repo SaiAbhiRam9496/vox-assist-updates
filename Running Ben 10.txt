@@ -1,0 +1,211 @@
+================================================================================
+                    VOX-ASSIST - LOCAL SETUP & RUN GUIDE
+================================================================================
+
+PROJECT: VoxAssist - AI-Powered Architectural Layout Generator
+CLONED FROM: https://github.com/PuneethPujala/vox-assist.git
+LOCATION: D:\VOX\vox-assist
+
+================================================================================
+                            WHAT WAS INSTALLED
+================================================================================
+
+BACKEND (Python):
+- FastAPI (web framework for API)
+- Motor (async MongoDB driver)
+- Firebase Admin SDK (authentication)
+- Uvicorn (ASGI server)
+- Shapely (geometry library)
+- All dependencies from requirements.txt
+
+FRONTEND (Node.js):
+- React (UI framework)
+- Vite (build tool)
+- Three.js (3D graphics library)
+- Tailwind CSS (styling)
+- Firebase SDK (authentication)
+- All dependencies from package.json
+
+DATABASE:
+- MongoDB (local instance on port 27017)
+
+================================================================================
+                        HOW TO RUN ON YOUR LAPTOP
+================================================================================
+
+IMPORTANT: You need TWO terminal windows open at the same time!
+
+================================================================================
+TERMINAL 1 - START THE BACKEND (API SERVER)
+================================================================================
+
+Run this command:
+
+    cd d:\VOX\vox-assist
+    python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+Expected Output:
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     Started reloader process
+
+Status: ✅ Backend is now running on PORT 8000
+
+KEEP THIS TERMINAL OPEN! Do not close it.
+
+================================================================================
+TERMINAL 2 - START THE FRONTEND (WEBSITE)
+================================================================================
+
+Run this command:
+
+    cd d:\VOX\vox-assist\frontend
+    npm run dev
+
+Expected Output:
+    VITE v5.0.0  ready in 100 ms
+    ➜  Local:   http://localhost:5173/
+    ➜  Press q to quit (Do NOT press q)
+
+Status: ✅ Frontend is now running on PORT 5173
+
+KEEP THIS TERMINAL OPEN! Do not close it.
+
+================================================================================
+STEP 3 - ACCESS YOUR APP IN BROWSER
+================================================================================
+
+Open any web browser (Chrome, Firefox, Edge, etc.)
+
+Go to this URL:
+    
+    http://localhost:5173
+
+You will see: VoxAssist Dashboard
+
+================================================================================
+                            QUICK REFERENCE
+================================================================================
+
+Backend API:        http://localhost:8000
+Frontend Website:   http://localhost:5173
+API Documentation:  http://localhost:8000/docs
+Database:           MongoDB (localhost:27017)
+
+To STOP the app:
+- Press CTRL+C in either terminal
+- Close both terminals
+
+To START again:
+- Repeat the same two commands above
+
+================================================================================
+                        ENVIRONMENT VARIABLES
+================================================================================
+
+Backend config file: D:\VOX\vox-assist\backend\.env
+Frontend config file: D:\VOX\vox-assist\frontend\.env
+
+These files contain:
+- MongoDB connection URL
+- Firebase credentials path
+- API URLs
+- Port numbers
+
+(Already created during setup)
+
+================================================================================
+                          TROUBLESHOOTING
+================================================================================
+
+Problem: "Cannot find package 'vite'"
+Solution: Make sure your terminal is in D:\VOX\vox-assist\frontend folder
+
+Problem: "Port 8000 already in use"
+Solution: Close other applications using port 8000, or use:
+    python -m uvicorn backend.main:app --port 8001
+
+Problem: "Port 5173 already in use"
+Solution: Close other applications using port 5173
+
+Problem: MongoDB connection error
+Solution: Make sure MongoDB is installed and running on your system
+
+================================================================================
+                        PROJECT STRUCTURE
+================================================================================
+
+D:\VOX\vox-assist\
+├── backend/                    (Python API)
+│   ├── main.py                 (Main FastAPI app)
+│   ├── engine/                 (Layout generation logic)
+│   ├── routes/                 (API endpoints)
+│   ├── models/                 (Database models)
+│   ├── services/               (Business logic)
+│   ├── database/               (MongoDB connection)
+│   ├── utils/                  (Utilities)
+│   ├── requirements.txt         (Python dependencies)
+│   └── .env                     (Configuration)
+│
+├── frontend/                   (React website)
+│   ├── src/                    (Source code)
+│   ├── package.json            (NPM dependencies)
+│   ├── vite.config.js          (Build configuration)
+│   ├── .env                    (Configuration)
+│   └── node_modules/           (Installed packages)
+│
+├── docker-compose.yml          (Docker setup)
+├── README.md                   (Project documentation)
+└── Running Ben 10.txt          (THIS FILE)
+
+================================================================================
+                            FINAL CHECKLIST
+================================================================================
+
+Before running, make sure:
+✅ MongoDB is installed (or MongoDB Atlas is configured)
+✅ Python 3.10+ is installed
+✅ Node.js and npm are installed
+✅ You have internet connection
+✅ Port 8000 is available
+✅ Port 5173 is available
+
+Commands to verify:
+    python --version              (Should be 3.10+)
+    node --version                (Should be installed)
+    npm --version                 (Should be installed)
+
+================================================================================
+                        DEVELOPER NOTES
+================================================================================
+
+Backend Stack:
+- FastAPI + Uvicorn
+- MongoDB with Motor async driver
+- Firebase authentication
+- Shapely geometry algorithms
+
+Frontend Stack:
+- React 18
+- Vite build tool
+- Three.js for 3D visualization
+- Tailwind CSS for styling
+- React Router for navigation
+
+Generated Layout Process:
+1. User types prompt in frontend
+2. Frontend sends to backend API
+3. Backend uses NLP to parse requirements
+4. Engine synthesizes layout using architectural rules
+5. Layout is converted to 3D model
+6. Results sent back to frontend
+7. User sees 2D floorplan + 3D visualization
+
+================================================================================
+                            SAVED: 27-02-2026
+================================================================================
+
+This file was created to help you run VoxAssist on your laptop.
+
+For more information, see: README.md in the project root
+
+Good luck! 🚀
