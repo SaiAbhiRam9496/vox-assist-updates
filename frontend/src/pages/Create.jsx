@@ -6,9 +6,60 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../contexts/AuthContext';
 import axios from 'axios';
-import { Loader2, Send, Download, Plus, Trash2, ArrowRight, ArrowLeft, CheckCircle2, Printer, Box } from 'lucide-react';
+import { Loader2, Send, Download, Plus, Trash2, ArrowRight, ArrowLeft, CheckCircle2, Printer, Box, Link2 } from 'lucide-react';
 import * as THREE from 'three';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+
+// Grouped room options — rendered as <optgroup> sections in the dropdown.
+// Hallway is intentionally EXCLUDED — it is auto-injected by the engine.
+// Users never need to choose "Hallway" explicitly.
+const ROOM_OPTION_GROUPS = [
+    {
+        label: 'Living Spaces',
+        options: [
+            { value: 'living', label: 'Living Room' },
+            { value: 'dining', label: 'Dining Room' },
+        ]
+    },
+    {
+        label: 'Bedrooms',
+        options: [
+            { value: 'bedroom', label: 'Bedroom' },
+            { value: 'study', label: 'Study / Office' },
+        ]
+    },
+    {
+        label: 'Utilities',
+        options: [
+            { value: 'kitchen', label: 'Kitchen' },
+            { value: 'bathroom', label: 'Bathroom' },
+            { value: 'storage', label: 'Storage / Closet' },
+        ]
+    },
+    {
+        label: 'Other',
+        options: [
+            { value: 'balcony', label: 'Balcony / Terrace' },
+        ]
+    },
+];
+
+// Flat list — used for simple value→label lookups
+const ROOM_OPTIONS = ROOM_OPTION_GROUPS.flatMap(g => g.options);
+
+function convertPromptUnits(text, fromUnit, toUnit) {
+    if (!text || fromUnit === toUnit) return text;
+    const factor = fromUnit === 'ft' ? 0.092903 : 10.7639;
+    const fromRegex =
+        fromUnit === 'ft'
+            ? /(\d+(?:\.\d+)?)\s*(?:sqft|sq\s*ft|square\s+feet)/gi
+            : /(\d+(?:\.\d+)?)\s*(?:sqm|sq\s*m|square\s+meters?)/gi;
+    const toLabel = toUnit === 'ft' ? 'sqft' : 'sqm';
+    return text.replace(fromRegex, (_match, num) => {
+        const converted = Math.round(parseFloat(num) * factor);
+        return `${converted} ${toLabel}`;
+    });
+}
 
 // Bridge component to expose Three.js scene and renderer to parent via refs
 const SceneExporter = ({ sceneRef, glRef }) => {
@@ -148,6 +199,8 @@ const Create = () => {
     const [totalAreaConstraint, setTotalAreaConstraint] = useState(1000);
     const [validationError, setValidationError] = useState('');
 
+    const [adjacencyPairs, setAdjacencyPairs] = useState([]);
+
     // Generation State
     const [loading, setLoading] = useState(false);
     const [generationStatus, setGenerationStatus] = useState(''); // Simulated SSE
@@ -225,6 +278,10 @@ const Create = () => {
         : `A house with a total area of around ${totalAreaConstraint} sq${unit}. It includes: ` +
         rooms.map(r => `a ${r.area} sq${unit} ${r.type} room`).join(', ') + '.';
 
+    const compiledAdjacencyPairs = adjacencyPairs
+        .filter(p => p.roomA && p.roomB && p.roomA !== p.roomB)
+        .map(p => [p.roomA, p.roomB]);
+
     // Area Distribution Graph Data
     const totalRoomArea = rooms.reduce((acc, r) => acc + parseInt(r.area || 0), 0);
     const unusedArea = Math.max(0, totalAreaConstraint - totalRoomArea);
@@ -245,6 +302,51 @@ const Create = () => {
 
     const handleRemoveRoom = (id) => {
         setRooms(rooms.filter(r => r.id !== id));
+    };
+
+    // ── Dynamic room instances for adjacency dropdowns ───────────────────────
+    // Built from the current `rooms` state in manual mode. Each entry has a
+    // stable `instanceKey` (e.g. "bedroom_1") and a human label ("Bedroom 1").
+    // When there's only one room of a type, no number is appended.
+    const roomInstances = (() => {
+        const typeTotals = {};
+        rooms.forEach(r => { typeTotals[r.type] = (typeTotals[r.type] || 0) + 1; });
+        const counters = {};
+        return rooms.map(r => {
+            counters[r.type] = (counters[r.type] || 0) + 1;
+            const instance = counters[r.type];
+            const multi = typeTotals[r.type] > 1;
+            const typeLabel = ROOM_OPTIONS.find(o => o.value === r.type)?.label || r.type;
+            return {
+                key:   multi ? `${r.type}_${instance}` : r.type,
+                label: multi ? `${typeLabel} ${instance}` : typeLabel,
+                type:  r.type,
+            };
+        });
+    })();
+
+    const handleAddAdjacency = () => {
+        // Default to the first two distinct instances, or fallback values
+        const first  = roomInstances[0]?.key  || 'bedroom';
+        const second = roomInstances.find(r => r.key !== first)?.key || 'living';
+        setAdjacencyPairs([...adjacencyPairs, { id: Date.now(), roomA: first, roomB: second }]);
+    };
+
+    const handleUpdateAdjacency = (id, field, value) => {
+        setAdjacencyPairs(adjacencyPairs.map(p => p.id === id ? { ...p, [field]: value } : p));
+    };
+
+    const handleRemoveAdjacency = (id) => {
+        setAdjacencyPairs(adjacencyPairs.filter(p => p.id !== id));
+    };
+
+    const handleUnitToggle = () => {
+        const fromUnit = unit;
+        const toUnit = unit === 'ft' ? 'm' : 'ft';
+        setUnit(toUnit);
+        if (inputMode === 'text' && textPrompt.trim()) {
+            setTextPrompt(prev => convertPromptUnits(prev, fromUnit, toUnit));
+        }
     };
 
     const computeRoomDimensions = (roomId) => {
@@ -301,8 +403,19 @@ const Create = () => {
             }
         } else {
             const totalRoomArea = rooms.reduce((acc, r) => acc + parseInt(r.area || 0), 0);
-            if (totalRoomArea > totalAreaConstraint * 1.1) {
-                setValidationError(`Conflict: Total room area (${totalRoomArea} sq${unit}) significantly exceeds the total house boundary (${totalAreaConstraint} sq${unit}).`);
+            // Soft advisory — only block at 150%+. The backend scales rooms
+            // proportionally, so moderate overages are fine.
+            if (totalRoomArea > totalAreaConstraint * 1.5) {
+                setValidationError(
+                    `Note: Rooms total ${totalRoomArea} sq${unit} vs ${totalAreaConstraint} sq${unit} target. ` +
+                    `The AI will scale rooms proportionally. Click "Review Design" again to proceed.`
+                );
+                return false;
+            }
+        }
+        for (const p of adjacencyPairs) {
+            if (p.roomA === p.roomB) {
+                setValidationError('An adjacency pair cannot reference the same room twice.');
                 return false;
             }
         }
@@ -339,9 +452,42 @@ const Create = () => {
 
         try {
             const token = await currentUser.getIdToken();
+            
+            // Prepare payload
+            const payload = { 
+                prompt: compiledPrompt, 
+                adjacency_pairs: compiledAdjacencyPairs, 
+                unit 
+            };
+            
+            // Add rooms_spec in manual mode (bypass NLP parsing).
+            // Each room includes instance number and display name so the backend
+            // can correctly label Bedroom 1, Bedroom 2 etc.
+            if (inputMode === 'manual') {
+                // Count instances per type to build numbered names
+                const instanceCounters = {};
+                const typeTotals = {};
+                rooms.forEach(r => { typeTotals[r.type] = (typeTotals[r.type] || 0) + 1; });
+
+                payload.rooms_spec = rooms.map(room => {
+                    instanceCounters[room.type] = (instanceCounters[room.type] || 0) + 1;
+                    const instance = instanceCounters[room.type];
+                    const name = typeTotals[room.type] > 1
+                        ? `${room.type}_${instance}`
+                        : room.type;
+                    return {
+                        type: room.type,
+                        name,
+                        instance,
+                        // unit state is 'ft' or 'm' — backend always expects sqft
+                        area: unit === 'm' ? room.area * 10.764 : room.area,
+                    };
+                });
+            }
+            
             const response = await axios.post(
                 `${import.meta.env.VITE_API_URL}/api/v1/generate`,
-                { prompt: compiledPrompt },
+                payload,
                 { headers: { Authorization: `Bearer ${token}` } }
             );
 
@@ -455,7 +601,7 @@ const Create = () => {
                                         <div className="flex justify-between items-center mb-1">
                                             <label className="block text-sm font-medium text-stone-700">Target Total Area (sq{unit})</label>
                                             <button
-                                                onClick={() => setUnit(u => u === 'ft' ? 'm' : 'ft')}
+                                                onClick={handleUnitToggle}
                                                 className="text-xs bg-stone-200 text-stone-600 px-2 py-0.5 rounded font-mono hover:bg-stone-300"
                                             >
                                                 {unit === 'ft' ? 'Switch to Meters' : 'Switch to Feet'}
@@ -508,13 +654,13 @@ const Create = () => {
                                                     onChange={(e) => handleRoomChange(room.id, 'type', e.target.value)}
                                                     className="flex-1 p-2 border border-stone-200 rounded-lg outline-none text-sm bg-white"
                                                 >
-                                                    <option value="living">Living Room</option>
-                                                    <option value="bedroom">Bedroom</option>
-                                                    <option value="bathroom">Bathroom</option>
-                                                    <option value="kitchen">Kitchen</option>
-                                                    <option value="dining">Dining Room</option>
-                                                    <option value="study">Study</option>
-                                                    <option value="balcony">Balcony</option>
+                                                    {ROOM_OPTION_GROUPS.map(group => (
+                                                        <optgroup key={group.label} label={group.label}>
+                                                            {group.options.map(o => (
+                                                                <option key={o.value} value={o.value}>{o.label}</option>
+                                                            ))}
+                                                        </optgroup>
+                                                    ))}
                                                 </select>
                                                 <input
                                                     type="number"
@@ -532,13 +678,79 @@ const Create = () => {
                                             <Plus size={16} /> Add Room
                                         </button>
                                     </div>
+                                    <div className="mb-6 pt-4 border-t border-stone-100">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <div>
+                                                <label className="block text-sm font-medium text-stone-700">Adjacency Constraints</label>
+                                                <p className="text-[11px] text-stone-400 mt-0.5">Prefer these rooms to share a wall</p>
+                                            </div>
+                                            <button
+                                                onClick={handleAddAdjacency}
+                                                className="text-xs text-charcoal border border-stone-200 px-2 py-1 rounded-lg hover:bg-stone-50 flex items-center gap-1"
+                                            >
+                                                <Plus size={12} /> Add
+                                            </button>
+                                        </div>
+
+                                        {adjacencyPairs.length === 0 && (
+                                            <p className="text-xs text-stone-400 italic py-2">
+                                                No constraints — rooms will be placed automatically.
+                                            </p>
+                                        )}
+
+                                        {roomInstances.length < 2 && adjacencyPairs.length > 0 && (
+                                            <p className="text-xs text-amber-500 italic py-1">
+                                                Add at least 2 rooms above to set adjacency constraints.
+                                            </p>
+                                        )}
+
+                                        <div className="space-y-2">
+                                            {adjacencyPairs.map((pair) => (
+                                                <div key={pair.id} className="flex gap-2 items-center bg-stone-50 p-2 rounded-lg border border-stone-100">
+                                                    <select
+                                                        value={pair.roomA}
+                                                        onChange={(e) => handleUpdateAdjacency(pair.id, 'roomA', e.target.value)}
+                                                        className="flex-1 p-1.5 border border-stone-200 rounded-lg text-xs bg-white outline-none"
+                                                    >
+                                                        {roomInstances.map(inst => (
+                                                            <option key={inst.key} value={inst.key}>{inst.label}</option>
+                                                        ))}
+                                                    </select>
+
+                                                    <div className="flex items-center gap-0.5 text-[10px] text-stone-400 font-bold">
+                                                        <Link2 size={12} className="text-charcoal/40" />
+                                                    </div>
+
+                                                    <select
+                                                        value={pair.roomB}
+                                                        onChange={(e) => handleUpdateAdjacency(pair.id, 'roomB', e.target.value)}
+                                                        className="flex-1 p-1.5 border border-stone-200 rounded-lg text-xs bg-white outline-none"
+                                                    >
+                                                        {roomInstances
+                                                            .filter(inst => inst.key !== pair.roomA)
+                                                            .map(inst => (
+                                                                <option key={inst.key} value={inst.key}>{inst.label}</option>
+                                                            ))
+                                                        }
+                                                    </select>
+
+                                                    <button
+                                                        onClick={() => handleRemoveAdjacency(pair.id)}
+                                                        className="p-1 text-stone-400 hover:text-red-500 flex-shrink-0"
+                                                    >
+                                                        <Trash2 size={14} />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
                                 </>
                             ) : (
                                 <div className="mb-6">
                                     <div className="flex justify-between items-end mb-2">
                                         <p className="text-sm text-stone-500">Describe the rooms and dimensions you want conversationally.</p>
                                         <button
-                                            onClick={() => setUnit(u => u === 'ft' ? 'm' : 'ft')}
+                                            onClick={handleUnitToggle}
                                             className="text-xs bg-stone-200 text-stone-600 px-2 py-0.5 rounded font-mono hover:bg-stone-300 whitespace-nowrap"
                                         >
                                             {unit === 'ft' ? 'Switch to Meters' : 'Switch to Feet'}
@@ -550,6 +762,7 @@ const Create = () => {
                                         placeholder={`E.g., I want a 1000 sq${unit} house with a 300 sq${unit} living room, a 150 sq${unit} bedroom...`}
                                         className="w-full p-4 rounded-xl border border-stone-200 focus:border-charcoal focus:ring-1 focus:ring-charcoal outline-none resize-none h-48 text-stone-700 bg-stone-50"
                                     />
+                                    <p className="text-[11px] text-stone-400 mt-1">Tip: you can type adjacency hints like "Bedroom adjacent to Study".</p>
                                 </div>
                             )}
 
@@ -711,10 +924,12 @@ const Create = () => {
                                                 onMouseLeave={() => setHoveredRoomId(null)}
                                             >
                                                 <div className="flex items-center gap-2">
-                                                    <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: room.color || '#e5e7eb' }} />
-                                                    <span className="text-stone-600 capitalize truncate w-16" title={room.type}>{room.type}</span>
+                                                    <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: room.color || '#e5e7eb' }} />
+                                                    <span className="text-stone-600 truncate w-20" title={room.type}>{room.type}</span>
                                                 </div>
-                                                <span className="font-mono text-stone-400">{Math.round(room.area)}</span>
+                                                <span className="font-mono text-stone-400">
+                                                    {room.requested_area_sqft ? `${room.requested_area_sqft} → ${Math.round(room.area)}` : Math.round(room.area)}
+                                                </span>
                                             </div>
                                         ))}
                                     </div>

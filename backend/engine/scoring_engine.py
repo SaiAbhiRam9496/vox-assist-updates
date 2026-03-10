@@ -3,7 +3,7 @@ from backend.engine.layout_features import extract_layout_features
 
 class ScoringEngine:
     @staticmethod
-    def evaluate(layout):
+    def evaluate(layout, adjacency_satisfaction: float = 1.0):
         """
         Evaluate a layout using physics-based architectural metrics.
         Input: layout dict with 'rooms', 'doors'
@@ -12,20 +12,24 @@ class ScoringEngine:
         rooms = layout.get("rooms", {})
         if not rooms:
             return {
-                "efficiency": 0, "privacy": 0, "daylight": 0, 
-                "circulation": 0, "average": 0
+                "efficiency": 0,
+                "privacy": 0,
+                "daylight": 0,
+                "circulation": 0,
+                "adjacency_satisfaction_pct": int(adjacency_satisfaction * 100),
+                "average": 0
             }
 
         # 1. Feature Extraction (Physics)
         features = extract_layout_features(layout)
         
         # 2. Metric Computation
-        scores = ScoringEngine._compute_scores(features)
+        scores = ScoringEngine._compute_scores(features, adjacency_satisfaction)
         
         return scores
 
     @staticmethod
-    def _compute_scores(features):
+    def _compute_scores(features, adjacency_satisfaction: float = 1.0):
         """
         Convert physical features into 0-100 architectural scores.
         """
@@ -86,10 +90,21 @@ class ScoringEngine:
         # 30m -> 50, 60m -> 100.
         daylight = min(100, features["exterior_exposure"] * 1.2)
         
+        adj_pct = int(adjacency_satisfaction * 100)
+
+        blended_average = (
+            efficiency * 0.28
+            + daylight * 0.28
+            + circulation * 0.19
+            + privacy * 0.15
+            + adj_pct * 0.10
+        )
+
         return {
             "efficiency": int(efficiency),
             "privacy": int(privacy),
             "daylight": int(daylight),
             "circulation": int(circulation),
-            "average": int((efficiency + privacy + daylight + circulation) / 4)
+            "adjacency_satisfaction_pct": adj_pct,
+            "average": int(blended_average)
         }

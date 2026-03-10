@@ -1,22 +1,31 @@
-from backend.models.models import DesignCreate, DesignBase
+from backend.models.models import DesignBase
 from bson import ObjectId
 from backend.services.generation_service import generation_service
 from backend.database.connection import get_database
 from backend.utils.auth_utils import get_current_user_uid
 from backend.utils.rate_limit import limiter
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 import logging
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-async def process_generation_job(job_id: str, prompt: str, uid: str):
+
+class GenerateRequest(BaseModel):
+    prompt: str
+    adjacency_pairs: Optional[List[List[str]]] = None
+    unit: Optional[str] = "ft"
+    rooms_spec: Optional[List[dict]] = None
+
+
+async def process_generation_job(job_id: str, prompt: str, uid: str, adjacency_pairs: Optional[List[List[str]]] = None, rooms_spec: Optional[List[dict]] = None):
     db = get_database()
     try:
-        result = await generation_service.generate_layout(prompt)
+        result = await generation_service.generate_layout(prompt, adjacency_pairs=adjacency_pairs or [], rooms_spec=rooms_spec)
         if not result["success"]:
             await db.jobs.update_one(
                 {"_id": ObjectId(job_id)}, 
@@ -27,6 +36,7 @@ async def process_generation_job(job_id: str, prompt: str, uid: str):
         design_doc = {
             "user_id": uid,
             "prompt": prompt,
+            "adjacency_pairs": result.get("adjacency_pairs", []),
             "layout_data": result["layout"],
             "spec_data": result["spec"],
             "model_url": result.get("model_url"),
@@ -60,7 +70,7 @@ async def process_generation_job(job_id: str, prompt: str, uid: str):
 @limiter.limit("5/minute")
 async def generate_layout(
     request: Request,
-    design: DesignCreate, 
+    design: GenerateRequest,
     background_tasks: BackgroundTasks,
     uid: str = Depends(get_current_user_uid)
 ):
@@ -72,13 +82,16 @@ async def generate_layout(
     job_doc = {
         "user_id": uid,
         "prompt": design.prompt,
+        "adjacency_pairs": design.adjacency_pairs or [],
+        "unit": design.unit or "ft",
+        "rooms_spec": design.rooms_spec,
         "status": "pending",
         "created_at": datetime.utcnow()
     }
     job = await db.jobs.insert_one(job_doc)
     job_id = str(job.inserted_id)
 
-    background_tasks.add_task(process_generation_job, job_id, design.prompt, uid)
+    background_tasks.add_task(process_generation_job, job_id, design.prompt, uid, design.adjacency_pairs or [], design.rooms_spec)
     
     return {"success": True, "job_id": job_id}
 

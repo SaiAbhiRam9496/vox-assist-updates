@@ -5,7 +5,7 @@ import logging
 import asyncio
 import random
 import csv
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 import uuid
 
 # Add project root to path to allow importing engine
@@ -26,27 +26,76 @@ class GenerationService:
     def __init__(self):
         self.architect = ProximityLayoutGenerator()
 
-    async def generate_layout(self, prompt: str) -> Dict[str, Any]:
+    async def generate_layout(
+        self,
+        prompt: str,
+        adjacency_pairs: Optional[List[List[str]]] = None,
+        rooms_spec: Optional[List[dict]] = None,
+    ) -> Dict[str, Any]:
         try:
             # Run blocking ML code in a thread executor
             loop = asyncio.get_event_loop()
+            adjacency_pairs = adjacency_pairs or []
             
-            # 1. Text to Rooms
-            rooms = await loop.run_in_executor(None, self.architect.generate_blueprint, prompt)
-            
-            if not rooms:
-                raise ValueError("AI could not generate room list from prompt")
+            # 1. Text to Rooms OR rooms_spec bypass
+            SQM_PER_SQFT = 0.092903  # Standard conversion factor
+
+            if rooms_spec:
+                # Bypass: Use structured rooms_spec directly from UI.
+                # The frontend always sends areas in sqft (it normalises sqm→sqft before
+                # sending). The synthesizer works internally in sqm. We convert here.
+                spec = {"rooms": []}
+                for room in rooms_spec:
+                    if room.get("type") and room.get("area"):
+                        area_sqft = float(room["area"])
+                        area_sqm  = area_sqft * SQM_PER_SQFT  # e.g. 200 sqft → 18.58 sqm
+                        spec["rooms"].append({
+                            "type":                room["type"].strip().lower(),
+                            "area":                area_sqm,          # synthesizer works in sqm
+                            "requested_area_sqft": int(area_sqft),    # original user value for fidelity display
+                        })
+                logger.info(f"Spec-driven mode: {len(spec['rooms'])} rooms (sqft→sqm conversion applied)")
+            else:
+                # Original path: Parse from text prompt
+                rooms = await loop.run_in_executor(None, self.architect.generate_blueprint, prompt)
                 
-            spec = {"rooms": []}
-            for room in rooms:
-                if isinstance(room, dict) and room.get("type") and room.get("area"):
-                    spec["rooms"].append({
-                        "type": room["type"].strip().lower(),
-                        "area": float(room["area"])
-                    })
+                if not rooms:
+                    raise ValueError("AI could not generate room list from prompt")
+                    
+                spec = {"rooms": []}
+                for room in rooms:
+                    if isinstance(room, dict) and room.get("type") and room.get("area"):
+                        # Preserve 'name' (e.g. "bedroom_1") and 'instance' from the
+                        # NLP/BHK parser so the synthesizer and display layer can
+                        # correctly identify individual room instances (Bedroom 1, Bedroom 2).
+                        spec["rooms"].append({
+                            "type":                room["type"].strip().lower(),
+                            "name":                room.get("name", room["type"].strip().lower()),
+                            "instance":            room.get("instance", 1),
+                            "area":                float(room["area"]),
+                            "requested_area_sqft": int(float(room["area"]) * 10.764)
+                        })
             
             if not spec["rooms"]:
                 raise ValueError("No valid rooms parsed")
+
+            # 1B. Parse adjacency preferences from text prompt and merge with UI pairs
+            nlp_prefer, nlp_avoid = self.architect.parse_adjacency_from_text(prompt)
+            if nlp_avoid:
+                logger.info(f"NLP detected avoidance hints: {nlp_avoid}")
+
+            merged_pairs: List[List[str]] = []
+            seen_pairs = set()
+            for pair in (adjacency_pairs + nlp_prefer):
+                if not isinstance(pair, list) or len(pair) != 2:
+                    continue
+                key = tuple(sorted([str(pair[0]).strip().lower(), str(pair[1]).strip().lower()]))
+                if key[0] and key[1] and key[0] != key[1] and key not in seen_pairs:
+                    merged_pairs.append([key[0], key[1]])
+                    seen_pairs.add(key)
+
+            if merged_pairs:
+                logger.info(f"Effective soft adjacency pairs: {merged_pairs}")
 
             # 2. Layout Synthesis & CANDIDATE GENERATION (Best-of-N)
             import uuid
@@ -59,85 +108,131 @@ class GenerationService:
 
             # Generate 3 candidates
             for i in range(3):
-                # A. Synthesize
                 seed = random.randint(0, 1000000)
-                layout_candidate = await loop.run_in_executor(
-                    None, 
-                    synthesize_layout_from_spec, 
-                    spec, 
-                    {"RANDOM_SEED": seed}
-                )
-                
-                if not layout_candidate.get("rooms"):
-                    continue
+                try:
+                    # A. Synthesize
+                    layout_candidate = await loop.run_in_executor(
+                        None, 
+                        synthesize_layout_from_spec, 
+                        spec, 
+                        {"RANDOM_SEED": seed, "adjacency_pairs": merged_pairs}
+                    )
+
+                    if not layout_candidate.get("rooms"):
+                        logger.warning(f"Candidate {i}: synthesizer returned empty layout, skipping")
+                        continue
+
+                    # B. Score
+                    adj_satisfaction = layout_candidate.get("adjacency_satisfaction", 1.0)
+                    stats_candidate = ScoringEngine.evaluate(layout_candidate, adj_satisfaction)
+                    score_candidate = stats_candidate["average"]
                     
-                # B. Score
-                stats_candidate = ScoringEngine.evaluate(layout_candidate)
-                score_candidate = stats_candidate["average"]
-                
-                # C. Generate 3D Model (Unique per candidate)
-                model_id = f"{generation_id}_{i}"
-                model_filename = f"model_{model_id}.ply"
-                output_path = os.path.join(models_dir, model_filename)
-                
-                await loop.run_in_executor(
-                    None,
-                    build_house_from_layout,
-                    layout_candidate,
-                    False, # visualize=False
-                    output_path
-                )
-                
-                model_url = f"/static/models/{model_filename}"
-                
-                # Add to list
-                # Serialize the layout so it can be sent over JSON
-                serialized_candidate_layout = self._serialize_layout(layout_candidate)
-                
-                # Color Palette (Matching resplan_to_3d.py)
-                ROOM_COLORS = [
-                    "#A8DADC", "#F1FAEE", "#A8E6CF", "#FFD3B6", 
-                    "#FFAAA5", "#DCEDC1", "#D4A5A5", "#9D8189"
-                ]
-                
-                # Generate Spec for this candidate (Colors/Areas)
-                candidate_spec = {"rooms": []}
-                # 1. Get room items exactly as resplan_to_3d does (filtering empty/invalid)
-                from shapely.geometry import Polygon, MultiPolygon
-                generated_rooms_items = []
-                if layout_candidate.get("rooms"):
-                    for k, v in layout_candidate["rooms"].items():
-                         if v and not v.is_empty and isinstance(v, (Polygon, MultiPolygon)):
-                             generated_rooms_items.append((k, v))
-                
-                # 2. Iterate and assign colors by index
-                for idx, (room_name, poly) in enumerate(generated_rooms_items):
-                    display_type = room_name.split('_')[0].capitalize()
-                    if "bedroom" in room_name: display_type = "Bedroom"
+                    # C. Generate 3D Model (Unique per candidate)
+                    model_id = f"{generation_id}_{i}"
+                    model_filename = f"model_{model_id}.ply"
+                    output_path = os.path.join(models_dir, model_filename)
                     
-                    area_sqm = poly.area
-                    area_sqft = int(area_sqm * 10.764)
+                    await loop.run_in_executor(
+                        None,
+                        build_house_from_layout,
+                        layout_candidate,
+                        False, # visualize=False
+                        output_path
+                    )
                     
-                    candidate_spec["rooms"].append({
-                        "id": room_name,
-                        "type": display_type,
-                        "area": area_sqft,
-                        "color": ROOM_COLORS[idx % len(ROOM_COLORS)]
+                    model_url = f"/static/models/{model_filename}"
+                    
+                    # Add to list
+                    # Serialize the layout so it can be sent over JSON
+                    serialized_candidate_layout = self._serialize_layout(layout_candidate)
+                    
+                    # Color Palette (Matching resplan_to_3d.py)
+                    ROOM_COLORS = [
+                        "#A8DADC", "#F1FAEE", "#A8E6CF", "#FFD3B6", 
+                        "#FFAAA5", "#DCEDC1", "#D4A5A5", "#9D8189"
+                    ]
+                
+                    # Generate Spec for this candidate (Colors/Areas)
+                    candidate_spec = {"rooms": []}
+                    # 1. Get room items exactly as resplan_to_3d does (filtering empty/invalid)
+                    from shapely.geometry import Polygon, MultiPolygon
+                    generated_rooms_items = []
+                    if layout_candidate.get("rooms"):
+                        for k, v in layout_candidate["rooms"].items():
+                             if v and not v.is_empty and isinstance(v, (Polygon, MultiPolygon)):
+                                 generated_rooms_items.append((k, v))
+                
+                    # 2. Iterate and assign colors by index
+                    type_counter: Dict[str, int] = {}
+                    for idx, (room_name, poly) in enumerate(generated_rooms_items):
+                        r_type = room_name.split('_')[0]
+                        type_counter[r_type] = type_counter.get(r_type, 0) + 1
+                        type_idx = type_counter[r_type] - 1
+
+                        matching_specs = [r for r in spec["rooms"] if r["type"] == r_type]
+                        requested_sqft = matching_specs[type_idx]["requested_area_sqft"] if type_idx < len(matching_specs) else None
+
+                        # Build display name with instance number when there are
+                        # multiple rooms of the same type (Bedroom 1, Bedroom 2,
+                        # Bathroom 1, Bathroom 2, etc.).
+                        total_of_type = len(matching_specs)
+                        instance_num  = type_counter[r_type]
+                        if total_of_type > 1:
+                            display_type = f"{r_type.capitalize()} {instance_num}"
+                        else:
+                            display_type = r_type.capitalize()
+
+                        area_sqm = poly.area
+                        area_sqft = int(area_sqm * 10.764)
+
+                        if requested_sqft and requested_sqft > 0:
+                            area_error_pct = round(abs(area_sqft - requested_sqft) / requested_sqft * 100)
+                        else:
+                            area_error_pct = None
+                        
+                        candidate_spec["rooms"].append({
+                            "id": room_name,
+                            "type": display_type,
+                            "area": area_sqft,
+                            "requested_area_sqft": requested_sqft,
+                            "generated_area_sqft": area_sqft,
+                            "area_error_pct": area_error_pct,
+                            "color": ROOM_COLORS[idx % len(ROOM_COLORS)]
+                        })
+
+                    # Gentle area-fidelity penalty (max -10)
+                    error_values = [r["area_error_pct"] for r in candidate_spec["rooms"] if r.get("area_error_pct") is not None]
+                    if error_values:
+                        avg_error = sum(error_values) / len(error_values)
+                        fidelity_penalty = min(10.0, avg_error * 0.1)
+                        score_candidate = max(0, score_candidate - fidelity_penalty)
+                        stats_candidate["area_fidelity_avg_error_pct"] = round(avg_error, 1)
+                    else:
+                        stats_candidate["area_fidelity_avg_error_pct"] = 0
+
+                    candidates.append({
+                        "id": i,
+                        "layout": serialized_candidate_layout, 
+                        "spec": candidate_spec, # Store spec per candidate
+                        "stats": stats_candidate,
+                        "score": score_candidate,
+                        "model_url": model_url,
+                        "seed": seed,
+                        "adjacency_satisfaction": adj_satisfaction
                     })
 
-                candidates.append({
-                    "id": i,
-                    "layout": serialized_candidate_layout, 
-                    "spec": candidate_spec, # Store spec per candidate
-                    "stats": stats_candidate,
-                    "score": score_candidate,
-                    "model_url": model_url,
-                    "seed": seed
-                })
+                except ValueError as ve:
+                    # Room count mismatch, no placeable rooms, or other spec validation error.
+                    # Skip this candidate and try the next seed — do NOT kill the whole job.
+                    logger.warning(f"Candidate {i} (seed={seed}) failed validation: {ve}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Candidate {i} (seed={seed}) unexpected error: {e}")
+                    continue
             
             if not candidates:
-                 raise ValueError("Failed to generate any valid candidates")
-                 
+                raise ValueError("Failed to generate any valid candidates")
+                
             # 3. Select Best (Default Winner)
             best_candidate = max(candidates, key=lambda x: x['score'])
             
@@ -146,20 +241,6 @@ class GenerationService:
             serialized_layout = best_candidate['layout']
             display_spec = best_candidate['spec']
             
-            # --- COLOR SYNC FIX (Cleaned up) ---
-            # Display spec is now pre-calculated per candidate. 
-            
-            # ----------------------
-            
-            # ----------------------
-
-            # Log to CSV (using sqft values) and get stats
-            # stats = {}
-            # try:
-            #     stats = self._log_to_csv(display_spec, layout)
-            # except Exception as e:
-            #     logger.error(f"CSV Logging failed: {e}")
-            
             # Use computed stats from ScoringEngine
             stats = best_candidate['stats']
 
@@ -167,11 +248,12 @@ class GenerationService:
                 "success": True,
                 "spec": display_spec, # Send sqft + colors to frontend
                 "layout": serialized_layout, 
-                "model_url": model_url,
+                "model_url": best_candidate["model_url"],
                 "design_id": generation_id,
                 "score": stats.get("efficiency", 0.0), # EXTRACTED FROM STATS
                 "stats": stats, # Detailed scores
                 "candidates": candidates, # The Best-of-N candidates for UI
+                "adjacency_pairs": merged_pairs,
                 "message": "Layout generated successfully"
             }
 

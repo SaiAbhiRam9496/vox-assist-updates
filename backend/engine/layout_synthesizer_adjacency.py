@@ -2,6 +2,9 @@ from shapely.geometry import box, Point, Polygon, LineString
 from shapely.ops import unary_union
 import numpy as np
 import random
+import logging
+
+logger = logging.getLogger(__name__)
 
 from adjacency_rules import ADJACENCY_RULES, validate_adjacency
 from corridor_generator import generate_corridors
@@ -24,10 +27,12 @@ DEFAULT_CONFIG = {
     "EXTERNAL_OFFSET": 5.0,
     "MAX_ROW_WIDTH": 40.0,
     "RANDOM_SEED": None,
+    "adjacency_pairs": [],
 }
 
 ZONES = {
     "public": ["living", "dining"],
+    "circulation": ["hallway"],
     "semi_public": ["kitchen"],
     "private": ["bedroom", "study"],
     "service": ["bathroom", "storage", "utility"],
@@ -139,6 +144,41 @@ def _place_adjacent(base_poly, width, height, existing_polys, preferred_sides=No
     # Deterministic encourages compactness.
     return valid_candidates[0][0]
 
+def _place_with_area_constraint(room_type, target_area, base_poly, existing_polys, preferred_sides=None, tolerance=0.15, max_retries=5):
+    """
+    Place room with area constraint and retry logic for tolerance compliance.
+    Returns (polygon, actual_area) or (None, None) if failed.
+    """
+    for attempt in range(max_retries):
+        # Vary aspect ratio slightly on each retry
+        base_ratio = 1.5
+        variance = 0.3 * (attempt + 1) / max_retries  # Increase variance with retries
+        aspect_ratio = _random_aspect_ratio(base_ratio, variance)
+        
+        # Calculate dimensions from target area and aspect ratio
+        width = np.sqrt(target_area * aspect_ratio)
+        height = target_area / width
+        
+        # Try to place the room
+        poly = _place_adjacent(base_poly, width, height, existing_polys, preferred_sides)
+        
+        if poly is not None:
+            actual_area = poly.area
+            error_pct = abs(actual_area - target_area) / target_area
+            
+            if error_pct <= tolerance:
+                logger.info(f"{room_type}: area {actual_area:.1f} vs target {target_area:.1f} (error {error_pct*100:.1f}%)")
+                return poly, actual_area
+            else:
+                logger.debug(f"{room_type}: area {actual_area:.1f} vs target {target_area:.1f} (error {error_pct*100:.1f}%) - retrying")
+    
+    logger.warning(f"{room_type}: Failed to meet area tolerance after {max_retries} attempts")
+    # Return best effort placement
+    poly = _place_adjacent(base_poly, width, height, existing_polys, preferred_sides)
+    if poly is not None:
+        return poly, poly.area
+    return None, None
+
 def _get_external_walls(poly, all_other_polys):
     boundary = poly.boundary
     if all_other_polys:
@@ -241,8 +281,51 @@ def _get_compact_sides(existing_layouts):
         random.shuffle(sides)
         return sides
 
+def _preferred_partners(room_type: str, layouts: dict, adjacency_pairs: list) -> list:
+    partners = []
+    for pair in adjacency_pairs or []:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        a, b = pair
+        partner_type = None
+        if a == room_type:
+            partner_type = b
+        elif b == room_type:
+            partner_type = a
+
+        if partner_type:
+            for name in layouts:
+                if name.startswith(partner_type + "_") or name == partner_type:
+                    partners.append(name)
+    return partners
+
+def _try_place_with_soft_constraints(
+    room_type: str,
+    width: float,
+    height: float,
+    layouts: dict,
+    adjacency_pairs: list,
+):
+    partners = _preferred_partners(room_type, layouts, adjacency_pairs)
+    compact_sides = _get_compact_sides(layouts)
+
+    for partner_name in partners:
+        if partner_name not in layouts:
+            continue
+        partner_base_type = partner_name.split("_")[0]
+        is_valid, _ = validate_adjacency(room_type, partner_base_type)
+        if not is_valid:
+            continue
+
+        poly = _place_adjacent(layouts[partner_name], width, height, layouts.values(), compact_sides)
+        if poly:
+            return poly
+
+    return None
+
 def synthesize_single_floor(spec, config=None):
     cfg = {**DEFAULT_CONFIG, **(config or {})}
+    adjacency_pairs = cfg.get("adjacency_pairs", [])
     if cfg.get("RANDOM_SEED") is not None:
         random.seed(cfg["RANDOM_SEED"])
         np.random.seed(cfg["RANDOM_SEED"])
@@ -301,17 +384,65 @@ def synthesize_single_floor(spec, config=None):
             room_index[r_type] = room_index.get(r_type, 0) + 1
             room_name = f"{r_type}_{room_index[r_type]}"
             
-            # Place adjacent to core
-            preferred_sides = _get_compact_sides(layouts)
-            poly = _place_adjacent(core_poly, width, height, layouts.values(), preferred_sides)
+            poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
+            if not poly:
+                preferred_sides = _get_compact_sides(layouts)
+                poly = _place_adjacent(core_poly, width, height, layouts.values(), preferred_sides)
             
             if poly:
                 layouts[room_name] = poly
                 print(f"  🍽️  DINING/PUBLIC: {room_name} (attached to core)")
     
     if not core_room:
-        raise ValueError("No living room defined")
+        # No explicit living room — try to use any placed room as core anchor.
+        # Dining, hallway, or any other public room can serve this function.
+        if layouts:
+            core_room = next(iter(layouts))
+            core_poly = layouts[core_room]
+            print(f"  ⚠️  No living room in spec — using '{core_room}' as layout anchor")
+        else:
+            raise ValueError(
+                "Cannot synthesize layout: spec contains no placeable rooms. "
+                "Add at least one public room (living, dining, or hallway)."
+            )
     # core_poly is already defined above
+    
+    # ── PHASE 1.5: CIRCULATION (Hallway) ──────────────────────────────────
+    # Hallway acts as the architectural spine between the public zone and the
+    # private zone. It must be placed early so bedrooms can attach to it.
+    # Placement priority: adjacent to core (living or dining), on the side
+    # that maximises compactness, specifically pointing toward where bedrooms
+    # will be placed (the "interior" side of the core footprint).
+    for room in rooms_by_zone.get("circulation", []):
+        r_type = room["type"]
+        area   = float(room["area"])
+        # Hallways are rectangular. Use random.uniform directly instead of
+        # _random_aspect_ratio(2.5, 0.5) because that helper clamps both bounds
+        # to 2.0 (max(0.8, 2.0) and min(2.0, 3.0)), producing the identical
+        # rectangle on every seed and making hallway placement fail consistently.
+        aspect_ratio = random.uniform(1.5, 3.0)
+        height = (area / aspect_ratio) ** 0.5
+        width  = aspect_ratio * height
+        room_index[r_type] = room_index.get(r_type, 0) + 1
+        room_name = f"{r_type}_{room_index[r_type]}"
+
+        poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
+
+        if not poly:
+            # Prefer compact sides of core (builds inward, leaves perimeter for daylight)
+            compact_sides = _get_compact_sides(layouts)
+            poly = _place_adjacent(core_poly, width, height, layouts.values(), compact_sides)
+
+        if not poly:
+            # Last resort: any side of core
+            poly = _place_adjacent(core_poly, width, height, layouts.values())
+
+        if poly:
+            layouts[room_name] = poly
+            print(f"  🚪 CIRCULATION: {room_name} (spine adjacent to core)")
+        else:
+            print(f"  ⚠️  CIRCULATION: {room_name} could not be placed — will retry in Phase 5")
+    # ────────────────────────────────────────────────────────────────────────
     
     # PHASE 2: KITCHEN
     kitchen_rooms = rooms_by_zone["semi_public"]
@@ -328,8 +459,8 @@ def synthesize_single_floor(spec, config=None):
         # Priority: Attach to DINING if exists, else Core
         dining_rooms = [r for r in layouts.keys() if "dining" in r]
         
-        poly = None
-        if dining_rooms:
+        poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
+        if not poly and dining_rooms:
             # Try attaching to dining first (Living -> Dining -> Kitchen flow)
             for dining in dining_rooms:
                 preferred_sides = _get_compact_sides(layouts)
@@ -348,7 +479,6 @@ def synthesize_single_floor(spec, config=None):
         if poly:
             layouts[room_name] = poly
 
-    
     # PHASE 3: BEDROOMS
     bedrooms = rooms_by_zone["private"]
     # Randomize order of bedrooms
@@ -367,9 +497,11 @@ def synthesize_single_floor(spec, config=None):
         # Use Compactness Bias
         preferred_sides = _get_compact_sides(layouts)
         
-        # Prefer attaching to Core (Hall/Living) to ensure access
-        # NOT attaching to other bedrooms to avoid daisy-chaining without doors
-        poly = _place_adjacent(core_poly, width, height, layouts.values(), preferred_sides[:3])
+        poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
+        if not poly:
+            # Prefer attaching to Core (Hall/Living) to ensure access
+            # NOT attaching to other bedrooms to avoid daisy-chaining without doors
+            poly = _place_adjacent(core_poly, width, height, layouts.values(), preferred_sides[:3])
         
         if not poly:
              # Try other public rooms (Dining?)
@@ -403,10 +535,10 @@ def synthesize_single_floor(spec, config=None):
         room_index[r_type] = room_index.get(r_type, 0) + 1
         room_name = f"{r_type}_{room_index[r_type]}"
         
-        poly = None
+        poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
         
         # Strategy 1: Ensuite Bathroom (attach to corresponding bedroom, or study if bedrooms are full)
-        if r_type == "bathroom":
+        if not poly and r_type == "bathroom":
             target_room = None
             if bathroom_idx < len(bedroom_names):
                 target_room = bedroom_names[bathroom_idx]
@@ -475,15 +607,16 @@ def synthesize_single_floor(spec, config=None):
         room_index[r_type] = room_index.get(r_type, 0) + 1
         room_name = f"{r_type}_{room_index[r_type]}"
         
-        poly = None
+        poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
+
         # Balcony prefers living or bedroom
-        if r_type == "balcony":
+        if not poly and r_type == "balcony":
             targets = [name for name in layouts.keys() if name.startswith("living") or name.startswith("bedroom")]
             for target in targets:
                 poly = _place_adjacent(layouts[target], width, height, layouts.values())
                 if poly:
                     break
-        else:
+        elif not poly:
             poly = _place_adjacent(core_poly, width, height, layouts.values())
         
         if poly:
@@ -492,8 +625,64 @@ def synthesize_single_floor(spec, config=None):
     
     return layouts
 
+def _validate_room_counts(spec, placed_rooms):
+    """
+    Soft validation: log warnings when placed room counts differ from the spec,
+    but NEVER raise. A layout with a missing hallway or an extra room is still
+    a usable layout — the scoring engine will naturally penalise it. Raising
+    here causes every candidate to be skipped when one room cannot be placed,
+    which produces the 'Failed to generate any valid candidates' error.
+
+    Returns True if everything matched, False if there are any mismatches.
+    The caller should log the outcome but generation always continues.
+    """
+    spec_counts = {}
+    for room in spec.get("rooms", []):
+        room_type = room.get("type", "").lower()
+        if room_type:
+            spec_counts[room_type] = spec_counts.get(room_type, 0) + 1
+
+    placed_counts = {}
+    for room_name in placed_rooms.keys():
+        room_type = room_name.split("_")[0].lower()
+        placed_counts[room_type] = placed_counts.get(room_type, 0) + 1
+
+    is_valid = True
+
+    for room_type, spec_count in spec_counts.items():
+        placed_count = placed_counts.get(room_type, 0)
+        if placed_count != spec_count:
+            logger.warning(
+                f"Room count mismatch for '{room_type}': "
+                f"spec wanted {spec_count}, placed {placed_count}. "
+                f"Continuing with partial layout — scoring will reflect this."
+            )
+            is_valid = False
+
+    for room_type, placed_count in placed_counts.items():
+        if room_type not in spec_counts:
+            logger.warning(
+                f"Unexpected extra room placed: '{room_type}' (count={placed_count}). "
+                f"May have been injected by a fallback placement phase."
+            )
+            is_valid = False
+
+    if is_valid:
+        logger.info("Room count validation passed — all rooms placed correctly.")
+
+    return is_valid
+
 def synthesize_layout_from_spec(spec, config=None):
+    cfg = {**DEFAULT_CONFIG, **(config or {})}
     rooms = synthesize_single_floor(spec, config)
+    
+    # Soft validation: log whether all rooms were placed, but never abort.
+    # A partial layout (e.g. hallway couldn't be placed) still gets scored
+    # and potentially selected. Raising here caused "Failed to generate any
+    # valid candidates" because every candidate was silently discarded.
+    is_valid = _validate_room_counts(spec, rooms)
+    if not is_valid:
+        logger.warning("Proceeding with partial layout — one or more rooms could not be placed.")
     
     adjacency_set = set()
     room_names = list(rooms.keys())
@@ -574,6 +763,21 @@ def synthesize_layout_from_spec(spec, config=None):
         score -= 20
         
     score = max(0, min(100, score))
+
+    # Adjacency satisfaction (soft constraints)
+    satisfied = 0
+    for pair in cfg.get("adjacency_pairs", []):
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            continue
+        t_a, t_b = pair[0], pair[1]
+        for r1, r2 in adjacency_set:
+            base1, base2 = r1.split("_")[0], r2.split("_")[0]
+            if {base1, base2} == {t_a, t_b}:
+                satisfied += 1
+                break
+
+    requested_pairs = cfg.get("adjacency_pairs", [])
+    adjacency_satisfaction = (satisfied / len(requested_pairs)) if requested_pairs else 1.0
     
     return {
         "rooms": rooms,
@@ -581,5 +785,6 @@ def synthesize_layout_from_spec(spec, config=None):
         "doors": doors,
         "adjacency": valid_adjacency,
         "entrance": entrance,
-        "score": score
+        "score": score,
+        "adjacency_satisfaction": adjacency_satisfaction,
     }
