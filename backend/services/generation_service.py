@@ -231,7 +231,15 @@ class GenerationService:
                     continue
             
             if not candidates:
-                raise ValueError("Failed to generate any valid candidates")
+                # Give a helpful diagnosis based on the spec
+                room_types = [r["type"] for r in spec["rooms"]]
+                total_area = sum(r["area"] for r in spec["rooms"])
+                raise ValueError(
+                    f"Could not generate a valid layout after 3 attempts. "
+                    f"Spec had {len(spec['rooms'])} rooms ({', '.join(room_types)}) "
+                    f"totalling {total_area:.1f} sqm. "
+                    f"Try simplifying your prompt or reducing the number of rooms."
+                )
                 
             # 3. Select Best (Default Winner)
             best_candidate = max(candidates, key=lambda x: x['score'])
@@ -244,16 +252,29 @@ class GenerationService:
             # Use computed stats from ScoringEngine
             stats = best_candidate['stats']
 
+            # Build area warnings for rooms that missed target by >15%
+            area_warnings = []
+            for room in display_spec.get("rooms", []):
+                err = room.get("area_error_pct")
+                if err is not None and err > 15:
+                    area_warnings.append(
+                        f"{room['type']} target {room.get('requested_area_sqft','?')} sqft, "
+                        f"got {room.get('generated_area_sqft','?')} sqft ({err}% off)"
+                    )
+
             return {
                 "success": True,
-                "spec": display_spec, # Send sqft + colors to frontend
+                "spec": display_spec,
                 "layout": serialized_layout, 
                 "model_url": best_candidate["model_url"],
                 "design_id": generation_id,
-                "score": stats.get("efficiency", 0.0), # EXTRACTED FROM STATS
-                "stats": stats, # Detailed scores
-                "candidates": candidates, # The Best-of-N candidates for UI
+                "score": stats.get("efficiency", 0.0),
+                "stats": stats,
+                "candidates": candidates,
                 "adjacency_pairs": merged_pairs,
+                "area_warnings": area_warnings,       # [] = all rooms on target
+                "candidates_attempted": 3,
+                "candidates_succeeded": len(candidates),
                 "message": "Layout generated successfully"
             }
 

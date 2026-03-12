@@ -45,8 +45,10 @@ def get_zone(room_type):
     return "other"
 
 def _random_aspect_ratio(base_ratio=1.5, variance=0.5):
+    # Cap raised to 4.0 so elongated rooms (balcony, hallway) can be generated.
+    # Hard 2.0 ceiling was causing identical rectangles on every seed.
     min_ratio = max(0.8, base_ratio - variance)
-    max_ratio = min(2.0, base_ratio + variance)
+    max_ratio = min(4.0, base_ratio + variance)
     return random.uniform(min_ratio, max_ratio)
 
 def _place_adjacent(base_poly, width, height, existing_polys, preferred_sides=None):
@@ -597,31 +599,64 @@ def synthesize_single_floor(spec, config=None):
         else:
             print(f"  ❌ FAILED to place {room_name}")
     
-    # PHASE 5: OTHER (balcony, etc.)
+    # PHASE 5: OTHER (balcony, garden, parking, etc.)
+    # Preference order per room type:
+    #   balcony  → living > bedroom > core
+    #   garden   → living > core > any
+    #   parking  → hallway > core > any (exterior feel)
+    #   default  → core > any
+    OTHER_PREFS = {
+        "balcony": ["living", "bedroom"],
+        "garden":  ["living", "dining"],
+        "parking": ["hallway", "living"],
+    }
     for room in rooms_by_zone["other"]:
         r_type = room["type"]
         area = float(room["area"])
-        aspect_ratio = _random_aspect_ratio(1.0, 0.3)
+        # Balcony/garden are elongated; parking is wide
+        if r_type == "balcony":
+            aspect_ratio = _random_aspect_ratio(2.5, 0.5)
+        elif r_type == "parking":
+            aspect_ratio = _random_aspect_ratio(1.8, 0.4)
+        else:
+            aspect_ratio = _random_aspect_ratio(1.2, 0.4)
         height = (area / aspect_ratio) ** 0.5
-        width = aspect_ratio * height
+        width  = aspect_ratio * height
         room_index[r_type] = room_index.get(r_type, 0) + 1
         room_name = f"{r_type}_{room_index[r_type]}"
-        
+
         poly = _try_place_with_soft_constraints(r_type, width, height, layouts, adjacency_pairs)
 
-        # Balcony prefers living or bedroom
-        if not poly and r_type == "balcony":
-            targets = [name for name in layouts.keys() if name.startswith("living") or name.startswith("bedroom")]
-            for target in targets:
-                poly = _place_adjacent(layouts[target], width, height, layouts.values())
+        if not poly:
+            # Try preferred adjacency targets in order
+            prefs = OTHER_PREFS.get(r_type, [])
+            for pref_prefix in prefs:
+                targets = [n for n in layouts.keys() if n.startswith(pref_prefix)]
+                for target in targets:
+                    poly = _place_adjacent(layouts[target], width, height, layouts.values())
+                    if poly:
+                        print(f"  📦 OTHER: {room_name} (attached to {target})")
+                        break
                 if poly:
                     break
-        elif not poly:
+
+        if not poly and core_poly is not None:
             poly = _place_adjacent(core_poly, width, height, layouts.values())
-        
+            if poly:
+                print(f"  📦 OTHER: {room_name} (fallback to core)")
+
+        if not poly:
+            # Last resort — attach to any placed room
+            for existing_poly in layouts.values():
+                poly = _place_adjacent(existing_poly, width, height, layouts.values())
+                if poly:
+                    print(f"  📦 OTHER: {room_name} (last-resort placement)")
+                    break
+
         if poly:
             layouts[room_name] = poly
-            print(f"  📦 OTHER: {room_name}")
+        else:
+            print(f"  ❌ FAILED to place {room_name}")
     
     return layouts
 

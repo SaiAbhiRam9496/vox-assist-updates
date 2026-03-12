@@ -45,7 +45,7 @@ class ProximityLayoutGenerator:
         # Minimum realistic areas (sqm) - Converted from sqft roughly / 10
         # Increased to ensure no 50 sqft bedrooms (approx 5 sqm)
         self.min_areas = {
-            'bedroom': 10, 'kitchen': 8, 'bathroom': 5,
+            'bedroom': 10, 'kitchen': 8, 'bathroom': 4.5,
             'living': 16, 'storage': 4, 'balcony': 5, 'garden': 5,
             'study': 6, 'dining': 9, 'hallway': 4
         }
@@ -730,13 +730,17 @@ class ProximityLayoutGenerator:
             else:
                 # Rule 3: Default distribution
                 DEFAULTS = {
-                    "living": 0.28,
-                    "bedroom": 0.31, # combined master (18) + bedroom (13)
-                    "kitchen": 0.12,
-                    "dining": 0.10,
+                    "living":   0.28,
+                    "bedroom":  0.31,
+                    "kitchen":  0.12,
+                    "dining":   0.10,
                     "bathroom": 0.08,
-                    "hallway": 0.07,
-                    "storage": 0.04
+                    "hallway":  0.07,
+                    "storage":  0.04,
+                    "study":    0.08,
+                    "balcony":  0.06,
+                    "garden":   0.06,
+                    "parking":  0.06,
                 }
                 
                 # Rule 2: "bigger [room]" -> 1.5x default percentage
@@ -755,10 +759,26 @@ class ProximityLayoutGenerator:
                     t_big = self._resolve_room_type(cm.group(1).strip())
                     if t_big:
                         amplified_rooms.add(t_big)
-                
+
+                # Rule 28: "small/tiny/compact [room]" OR "[room] should be small" → 0.5x default
+                shrunk_rooms = set()
+                for t in self.room_types:
+                    for syn in self.synonym_map.get(t, [t]):
+                        # "small study", "tiny bathroom", "compact kitchen"
+                        if re.search(r'\b(small|tiny|compact|minimal)\s+' + re.escape(syn) + r'\b', prompt.lower()):
+                            shrunk_rooms.add(t)
+                        # "study should be small", "keep the study small"
+                        if re.search(re.escape(syn) + r'\s+(?:should\s+be\s+|must\s+be\s+|be\s+)?(?:small|tiny|compact|minimal)\b', prompt.lower()):
+                            shrunk_rooms.add(t)
+
                 adjusted_defaults = {}
                 for t, pct in DEFAULTS.items():
-                    adjusted_defaults[t] = pct * 1.5 if t in amplified_rooms else pct
+                    if t in amplified_rooms:
+                        adjusted_defaults[t] = pct * 1.5
+                    elif t in shrunk_rooms:
+                        adjusted_defaults[t] = pct * 0.5
+                    else:
+                        adjusted_defaults[t] = pct
                 
                 # Count instances of each auto room type for equal splitting
                 type_counts = {}

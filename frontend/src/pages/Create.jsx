@@ -213,6 +213,7 @@ const Create = () => {
     const [hoveredRoomId, setHoveredRoomId] = useState(null);
     const [candidates, setCandidates] = useState([]);
     const [selectedCandidateId, setSelectedCandidateId] = useState(null);
+    const [areaWarnings, setAreaWarnings] = useState([]);
     const sceneRef = useRef();
     const glRef = useRef();
     const fullLayoutRef = useRef(null);
@@ -507,6 +508,7 @@ const Create = () => {
                             const result = jobRes.data.result;
                             const best = result.candidates.find(c => c.model_url === result.model_url) || result.candidates[0];
                             setCandidates(result.candidates);
+                            setAreaWarnings(result.area_warnings || []);
                             handleSelectCandidate(best);
                             setStep(4); // Results
                         } else if (jobRes.data.status === 'failed') {
@@ -820,12 +822,34 @@ const Create = () => {
                         </motion.div>
                     )}
 
-                    {/* STEP 3: Generating Overlay UI on left side */}
+                    {/* STEP 3: Generating — progress steps */}
                     {step === 3 && (
-                        <motion.div key="step3" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex-1 flex flex-col items-center justify-center text-center">
+                        <motion.div key="step3" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex-1 flex flex-col items-center justify-center text-center px-8">
                             <Loader2 className="w-12 h-12 animate-spin text-charcoal mb-6" />
                             <h2 className="text-xl font-light text-charcoal mb-2">Architecting Solutions</h2>
-                            <p className="text-stone-500 font-mono text-xs bg-stone-100 px-4 py-2 rounded-full">{generationStatus || "Initializing..."}</p>
+                            <p className="text-stone-500 font-mono text-xs bg-stone-100 px-4 py-2 rounded-full mb-6">{generationStatus || "Initializing..."}</p>
+                            {/* Progress pipeline */}
+                            <div className="w-full max-w-xs space-y-2 text-left">
+                                {[
+                                    "Analyzing constraints...",
+                                    "Generating adjacency graphs...",
+                                    "Optimizing layouts...",
+                                    "Rendering 3D Models...",
+                                    "Finalizing Details..."
+                                ].map((step_label, idx) => {
+                                    const currentIdx = ["Analyzing constraints...", "Generating adjacency graphs...", "Optimizing layouts...", "Rendering 3D Models...", "Finalizing Details..."].indexOf(generationStatus);
+                                    const done = idx < currentIdx;
+                                    const active = idx === currentIdx;
+                                    return (
+                                        <div key={idx} className={`flex items-center gap-2 text-xs transition-all duration-500 ${done ? 'text-emerald-600' : active ? 'text-charcoal font-medium' : 'text-stone-300'}`}>
+                                            <span className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
+                                                {done ? '✓' : active ? '▶' : '○'}
+                                            </span>
+                                            {step_label}
+                                        </div>
+                                    );
+                                })}
+                            </div>
                         </motion.div>
                     )}
 
@@ -836,6 +860,16 @@ const Create = () => {
                                 <h1 className="text-2xl font-light text-charcoal">Design Candidates</h1>
                                 <button onClick={resetWizard} className="text-xs text-stone-500 hover:text-charcoal underline">New Project</button>
                             </div>
+
+                            {/* Area accuracy warnings */}
+                            {areaWarnings.length > 0 && (
+                                <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+                                    <p className="text-xs font-medium text-amber-700 mb-1">⚠️ Some rooms deviated from target sizes:</p>
+                                    {areaWarnings.map((w, i) => (
+                                        <p key={i} className="text-xs text-amber-600 font-mono">{w}</p>
+                                    ))}
+                                </div>
+                            )}
 
                             {/* Candidate Gallery */}
                             <div className="grid grid-cols-3 gap-3 mb-6">
