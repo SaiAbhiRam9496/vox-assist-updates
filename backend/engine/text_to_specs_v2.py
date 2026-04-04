@@ -1,6 +1,14 @@
 import re
 import json
+import logging
 from typing import List, Dict, Tuple, Optional, Set
+
+try:
+    import requests as _requests
+except ImportError:
+    _requests = None
+
+logger = logging.getLogger(__name__)
 
 class ProximityLayoutGenerator:
     def __init__(self):
@@ -52,6 +60,7 @@ class ProximityLayoutGenerator:
 
         # Will hold metadata from the last parsed prompt
         self.last_metadata = None
+        self.llm_adjacency = {"prefer": [], "avoid": []}
 
     def _extract_total_area(self, text: str) -> int:
         """Extract the total / overall house area from the prompt."""
@@ -642,34 +651,145 @@ class ProximityLayoutGenerator:
                     return canonical
         return None
     # ────────────────────────────────────────────────────────────────────────────────
+    # OLLAMA LLM PARSING
+    # ────────────────────────────────────────────────────────────────────────────────
+    OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+    OLLAMA_MODEL = "vox-architect"
+
+    def _ollama_parse(self, prompt: str) -> Optional[Dict]:
+        """
+        Use a local Ollama LLM to extract rooms from a natural-language prompt.
+        Returns a Dict containing 'rooms' and 'total_area_sqm' if successful.
+        """
+        if _requests is None:
+            logger.info("[Ollama] `requests` library not available, skipping LLM parse.")
+            return None
+
+        system_prompt = (
+            "You are an architectural floor-plan assistant. "
+            "Input: A natural language description of a house.\n"
+            "Output: A JSON object with EXACTLY these keys:\n"
+            "  - \"total_area_sqm\": The target total area of the house (convert from sqft: 1 sqft = 0.092903 sqm).\n"
+            "  - \"rooms\": A list of room objects. Each must have \"type\" (canonical) and \"area_sqm\".\n"
+            "  - \"adjacency_prefer\": List of pairs of room types to be close.\n"
+            "  - \"adjacency_avoid\": List of pairs of room types to be far.\n\n"
+            "Rules:\n"
+            "1. Canonical types: living, bedroom, kitchen, bathroom, balcony, storage, study, dining, hallway, garden, parking.\n"
+            "2. If the user asks for '2 bedrooms', output TWO separate 'bedroom' objects in the list.\n"
+            "3. If areas are in sqft, convert to sqm (val * 0.092903).\n"
+            "4. Be thorough: extract EVERY room mentioned (e.g. guest bedroom, master bed, study, balcony).\n"
+            "5. Return ONLY JSON."
+        )
+
+        payload = {
+            "model": self.OLLAMA_MODEL,
+            "prompt": f"{system_prompt}\n\nUser prompt: {prompt}",
+            "stream": False,
+            "options": {"temperature": 0.1},
+        }
+
+        try:
+            resp = _requests.post(self.OLLAMA_URL, json=payload, timeout=120)
+            resp.raise_for_status()
+            raw = resp.json().get("response", "").strip()
+            logger.info(f"[Ollama] Raw response: {raw[:300]}")
+
+            # Strip markdown code fences
+            raw = re.sub(r'^```(?:json)?\s*', '', raw)
+            raw = re.sub(r'\s*```$', '', raw)
+
+            data = json.loads(raw)
+            rooms_json = data.get("rooms", [])
+            if not isinstance(rooms_json, list):
+                logger.warning("[Ollama] Response did not contain a valid rooms list.")
+                return None
+
+            # Store adjacency if provided
+            self.llm_adjacency = {
+                "prefer": data.get("adjacency_prefer", []),
+                "avoid": data.get("adjacency_avoid", [])
+            }
+
+            room_list: List[Dict] = []
+            for item in rooms_json:
+                rtype = str(item.get("type", "")).strip().lower()
+                area  = float(item.get("area_sqm", item.get("area", 0)))
+                
+                # Resolve type
+                if rtype not in self.room_types:
+                    resolved = self._resolve_room_type(rtype)
+                    if resolved: rtype = resolved
+                    else: continue
+
+                area = max(area, self.min_areas.get(rtype, 4))
+                room_list.append({
+                    'type': rtype,
+                    'area': round(area, 2),
+                    'auto': False,
+                    'explicit_area': area > 0,
+                })
+
+            if not room_list:
+                return None
+
+            return {
+                "rooms": room_list,
+                "total_area_sqm": data.get("total_area_sqm")
+            }
+
+        except Exception as e:
+            logger.error(f"[Ollama] Parse error: {e}")
+            return None
+
+    # ────────────────────────────────────────────────────────────────────────────────
 
     def generate_blueprint(self, prompt: str) -> List[Dict[str, any]]:
         print(f"\n--- PROMPT: \"{prompt}\" ---")
-        fast_path_result = self._try_fast_path(prompt)
-        if fast_path_result is not None:
-            total_area = sum(r['area'] for r in fast_path_result)
-            room_list = fast_path_result
-            used_area = total_area
-            excluded_types = set()
-        else:
-            # Stage 2: BHK shorthand
-            units_d    = self._detect_units(prompt.lower())
-            raw_total  = self._extract_total_area(prompt.lower())
-            total_sqm  = int(raw_total * 0.092903) if (units_d == 'sqft' or (units_d is None and raw_total > 400)) else raw_total
-            bhk = self._parse_bhk_shorthand(prompt, total_sqm)
-            if bhk is not None:
-                room_list = bhk
-                total_area = total_sqm
-                used_area = sum(r['area'] for r in room_list)
-                excluded_types = set()
-            else:
-                total_area, room_list, used_area, excluded_types = self.parse_natural_language(prompt)
         
-        # Expose basic metadata for external consumers (e.g., CSV export)
+        # 1. Extract dimensions/units from text first (used as fallback or validation)
+        units_d = self._detect_units(prompt.lower())
+        raw_total = self._extract_total_area(prompt.lower())
+        text_total_sqm = int(raw_total * 0.092903) if (units_d == 'sqft' or (units_d is None and raw_total > 400)) else raw_total
+
+        room_list = []
+        total_area = text_total_sqm
+        used_area = 0
+        excluded_types = set()
+
+        # Stage 0: Try Ollama LLM parsing
+        ollama_data = self._ollama_parse(prompt)
+        if ollama_data:
+            print(f"[Ollama] Successfully parsed {len(ollama_data['rooms'])} rooms.")
+            room_list = ollama_data['rooms']
+            # Prioritize LLM's total area if it matches a high number, else use text-extracted
+            llm_total = ollama_data.get('total_area_sqm')
+            if llm_total and llm_total > 10:
+                total_area = llm_total
+            used_area = sum(r['area'] for r in room_list)
+        else:
+            # Stage 1: Fast-path
+            fast_path = self._try_fast_path(prompt)
+            if fast_path:
+                room_list = fast_path
+                total_area = sum(r['area'] for r in room_list)
+                used_area = total_area
+            else:
+                # Stage 2: BHK / Natural fallback
+                bhk = self._parse_bhk_shorthand(prompt, text_total_sqm)
+                if bhk:
+                    room_list = bhk
+                    total_area = text_total_sqm
+                    used_area = sum(r['area'] for r in room_list)
+                else:
+                    total_area, room_list, used_area, excluded_types = self.parse_natural_language(prompt)
+        
+        # Expose basic metadata
         self.last_metadata = {
             "total_area": total_area,
             "used_area_initial": used_area,
             "rooms_initial": [r.copy() for r in room_list],
+            "adjacency_prefer": self.llm_adjacency["prefer"],
+            "adjacency_avoid": self.llm_adjacency["avoid"]
         }
         
         # Validate and clamp areas
@@ -804,13 +924,26 @@ class ProximityLayoutGenerator:
                 print(f"Scaling auto-assigned rooms by {scale:.2f} to fit {total_area} (explicit: {explicit_total}, auto: {auto_total})")
                 for r in room_list:
                     if not r.get('explicit_area', False):
-                        r['area'] = max(self.min_areas.get(r['type'], 5), int(r['area'] * scale))
+                        r['area'] = max(self.min_areas.get(r['type'], 5), round(r['area'] * scale, 1))
             else:
-                print(f"All rooms have explicit areas, no scaling needed")
+                # All rooms are explicit, but they don't sum to target? Proportional scale all of them.
+                scale = total_area / current_total
+                print(f"Proportional scaling all {len(room_list)} rooms by {scale:.2f} to hit target {total_area}")
+                for r in room_list:
+                    r['area'] = max(self.min_areas.get(r['type'], 5), round(r['area'] * scale, 1))
+        
+        # 4. Final Remainder Adjustment (to be pixel-perfect)
+        final_total = sum(r['area'] for r in room_list)
+        diff = total_area - final_total
+        if abs(diff) > 0.1 and room_list:
+            # Add/subtract the tiny difference to the largest room to match target perfectly
+            room_list.sort(key=lambda x: x['area'], reverse=True)
+            room_list[0]['area'] = round(room_list[0]['area'] + diff, 1)
+            print(f"Adjusted largest room '{room_list[0]['name']}' by {diff:.2f} to hit {total_area} exactly.")
 
         # Rule 17: if total still way over budget, proportionally scale all down
-        final_total = sum(r['area'] for r in room_list)
-        if final_total > total_area * 1.5:
+        final_total_check = sum(r['area'] for r in room_list)
+        if final_total_check > total_area * 1.5:
             s = total_area / final_total
             for r in room_list:
                 r['area'] = max(self.min_areas.get(r['type'], 4), int(r['area'] * s))

@@ -200,7 +200,7 @@ def _get_external_walls(poly, all_other_polys):
     return segments
 
 def _generate_entrance_door(living_room_poly, all_rooms):
-    other_rooms = [p for name, p in all_rooms.items() if name != next(k for k in all_rooms if k.startswith("living"))]
+    other_rooms = [p for name, p in all_rooms.items() if name != next((k for k in all_rooms if k.startswith("living")), "")]
     external_walls = _get_external_walls(living_room_poly, other_rooms)
     
     if not external_walls:

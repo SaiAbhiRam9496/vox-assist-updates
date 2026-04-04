@@ -18,7 +18,8 @@ graph TD;
 ```
 
 ## Features
-- **Prompt to Floorplan**: Type in spatial requirements, get structured room definitions and visual mappings.
+- **Prompt to Floorplan**: Type in spatial requirements, get structured room definitions via a local LLM-powered pipeline (Ollama).
+- **Custom ML Engine**: Utilizes the `vox-architect` model for high-fidelity architectural layout parsing and adjacency reasoning.
 - **3D Visualization**: Immediate structural parsing of 2D plans into robust 3D meshes rendered via React Three Fiber.
 - **Real-time UX**: Clean interfaces built with Radix and Shadcn Primitives featuring fluid Dark Mode switching.
 - **Freemium Metering**: Users receive 5 free layout generations. Upgrade via Stripe to unlock unlimited orchestration. 
@@ -36,8 +37,13 @@ Explore standard CRUD design endpoints, Monetization API Webhooks, and User metr
 ### Backend Pipeline (FastAPI)
 1. Navigate to `/backend`
 2. Configure `.env` using `.env.example` as reference.
-3. Boot the API: `uvicorn main:app --reload`
-4. The API orchestrates on port 8000.
+3. Install dependencies: `pip install -r requirements.txt`
+4. **Ollama Setup**: 
+   - Install [Ollama](https://ollama.com/)
+   - Pull the base model: `ollama pull llama3` (or the specific base used)
+   - Create the custom architect model: `ollama create vox-architect -f Modelfile` (ensure `Modelfile` is in the engine/training directory)
+5. Boot the API: `uvicorn main:app --reload`
+6. The API orchestrates on port 8000.
 
 ### Frontend App (React.js)
 1. Navigate to `/frontend`

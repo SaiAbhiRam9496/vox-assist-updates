@@ -31,5 +31,8 @@ backend/engine/ResPlan_Extracted/
 backend/engine/*.csv
 backend/engine/*.pkl
 *.exe
-ffmpeg.exe
+
+# Generated Models and Tests
+backend/static/models/*.ply
+backend/engine/test_results.txt
 

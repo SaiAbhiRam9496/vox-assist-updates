@@ -1,0 +1,90 @@
+DEBUGGING PROMPT:
+I want to design a modern 2BHK house of around 1200 sqft with a spacious living room (about 250 sqft) near the entrance, a kitchen (around 120 sqft) connected to a dining area, two bedrooms including a master bedroom (~200 sqft) with an attached bathroom and a guest bedroom (~150 sqft), along with a different common bathroom. I also want a small study/workspace and a balcony attached to the living room.
+
+--- RAW METADATA (from LLM) ---
+{
+  "total_area": 111.48,
+  "used_area_initial": 99.19,
+  "rooms_initial": [
+    {
+      "type": "living",
+      "area": 23.23,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "kitchen",
+      "area": 11.15,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "dining",
+      "area": 9.29,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "bedroom",
+      "area": 18.58,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "bathroom",
+      "area": 5,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "bedroom",
+      "area": 13.94,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "bathroom",
+      "area": 5,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "study",
+      "area": 7.43,
+      "auto": false,
+      "explicit_area": true
+    },
+    {
+      "type": "balcony",
+      "area": 5.57,
+      "auto": false,
+      "explicit_area": true
+    }
+  ],
+  "adjacency_prefer": [
+    [
+      "living",
+      "balcony"
+    ],
+    [
+      "kitchen",
+      "dining"
+    ],
+    [
+      "bedroom",
+      "bathroom"
+    ]
+  ],
+  "adjacency_avoid": []
+}
+
+--- PROCESSED ROOMS ---
+living: 26.1 sqm (auto=False)
+kitchen: 12.5 sqm (auto=False)
+dining: 10.4 sqm (auto=False)
+bedroom_1: 20.9 sqm (auto=False)
+bathroom_1: 5.6 sqm (auto=False)
+bedroom_2: 15.7 sqm (auto=False)
+bathroom_2: 5.6 sqm (auto=False)
+study: 8.4 sqm (auto=False)
+balcony: 6.3 sqm (auto=False)

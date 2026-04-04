@@ -849,7 +849,7 @@ const Create = () => {
                                             <span className="text-[10px] font-bold text-stone-400 uppercase">Option {c.id + 1}</span>
                                         </div>
                                         <div className={`absolute top-0 right-0 px-2 py-0.5 rounded-bl-lg text-[10px] font-bold ${selectedCandidateId === c.id ? 'bg-charcoal text-white' : 'bg-white/80 text-stone-600'}`}>
-                                            Score: {c.score}
+                                            Score: {Math.round(c.score)}
                                         </div>
                                     </div>
                                 ))}
