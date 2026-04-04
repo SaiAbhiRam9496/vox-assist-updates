@@ -16,7 +16,15 @@ db = Database()
 async def connect_to_mongo():
     db.client = AsyncIOMotorClient(MONGO_URL)
     db.db = db.client[DB_NAME]
-    
+    print(f"Connected to MongoDB at {MONGO_URL}")
+
+async def create_database_indexes():
+    """
+    Perform index creation in the background to avoid blocking the main server startup.
+    """
+    if not db.db:
+        return
+
     # Create Indexes
     try:
         await db.db.designs.create_index([("user_id", 1)])
@@ -24,12 +32,10 @@ async def connect_to_mongo():
         await db.db.users.create_index([("email", 1)], unique=True)
         await db.db.jobs.create_index([("user_id", 1)])
         await db.db.jobs.create_index([("created_at", -1)])
-        print("Database indexes created successfully")
+        print("Database indexes created/verified successfully")
     except Exception as e:
         logger.error(f"Failed to create database indexes: {e}")
         print(f"WARNING: Database index creation failed: {e}")
-        
-    print(f"Connected to MongoDB at {MONGO_URL}")
 
 async def close_mongo_connection():
     if db.client:

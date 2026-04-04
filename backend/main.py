@@ -1,21 +1,38 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routes import api, user
-from backend.database.connection import connect_to_mongo, close_mongo_connection
+from backend.database.connection import connect_to_mongo, close_mongo_connection, create_database_indexes
+import backend.database.connection
 from backend.utils.rate_limit import limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 import uvicorn
 import os
 import logging
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Fast DB connection
+    await connect_to_mongo()
+    
+    # Offload slow index creation to background
+    import asyncio
+    asyncio.create_task(create_database_indexes())
+    
+    yield
+    
+    # Shutdown
+    await close_mongo_connection()
 
 app = FastAPI(
     title="VoxAssist Backend Core",
     description="The underlying compute and orchestration API serving the VoxAssist AI generator platform.",
     version="2.0.0",
+    lifespan=lifespan,
     contact={
         "name": "VoxAssist Developer Support",
         "email": "support@voxassist.com",
@@ -64,13 +81,7 @@ app.include_router(user.router, prefix="/api/v1")
 os.makedirs("backend/static/models", exist_ok=True)
 app.mount("/static", StaticFiles(directory="backend/static"), name="static")
 
-@app.on_event("startup")
-async def startup_db_client():
-    await connect_to_mongo()
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    await close_mongo_connection()
+# Lifespan handles startup/shutdown now
 
 @app.get("/")
 def read_root():
