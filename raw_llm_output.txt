@@ -1,0 +1,14 @@
+﻿{
+  "total_area_sqm": 150,
+  "rooms": [
+    {"type": "bedroom", "area_sqm": 40},
+    {"type": "bathroom", "area_sqm": 10},
+    {"type": "kitchen", "area_sqm": 20},
+    {"type": "dining", "area_sqm": 15},
+    {"type": "balcony", "area_sqm": 30},
+    {"type": "meditation room", "area_sqm": 25},
+    {"type": "storage", "area_sqm": 20}
+  ],
+  "adjacency_prefer": [["kitchen", "dining"], ["bedroom", "bathroom"]],
+  "adjacency_avoid": [["balcony", "meditation room"]]
+}

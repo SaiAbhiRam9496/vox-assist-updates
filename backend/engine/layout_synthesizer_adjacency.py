@@ -623,6 +623,51 @@ def synthesize_single_floor(spec, config=None):
             layouts[room_name] = poly
             print(f"  📦 OTHER: {room_name}")
     
+    # PHASE 6: FINAL RETRY (Desperation pass for any unplaced rooms)
+    # Check what's missing
+    for room in spec.get("rooms", []):
+        r_type = room["type"]
+        # Determine if this room was actually placed
+        # We need to map back r_type to possible names: {r_type}_1, {r_type}_2, etc. or just {r_type}
+        # Actually, let's just track placed rooms more explicitly or check the counts.
+        pass
+
+    # A simpler way: just iterate all rooms in the spec and if they aren't in layouts, TRY AGAIN.
+    # Note: we need to handle the name mapping exactly as in previous phases.
+    re_counts = {}
+    for room in spec.get("rooms", []):
+        r_type = room["type"]
+        re_counts[r_type] = re_counts.get(r_type, 0) + 1
+        r_name = f"{r_type}_{re_counts[r_type]}" if any(r2["type"] == r_type and idx != i for idx, r2 in enumerate(spec["rooms"])) else r_type
+        # Wait, the naming logic in phases is a bit varied. Let's use a more robust check.
+        
+    # Better: just collect all names from layouts
+    placed_names = set(layouts.keys())
+    # Re-run a simplified version of the logic to find what's missing
+    type_tracker = {}
+    for room in spec.get("rooms", []):
+        t = room["type"]
+        type_tracker[t] = type_tracker.get(t, 0) + 1
+        name = f"{t}_{type_tracker[t]}" # (standard naming)
+        alt_name = t if type_tracker[t] == 1 else "MISSING" # handle cases where name is just type
+        
+        if name not in placed_names and alt_name not in placed_names:
+            # TRY TO PLACE AT ALL COSTS
+            area = float(room["area"])
+            aspect = 1.2
+            h = (area / aspect) ** 0.5
+            w = aspect * h
+            
+            # Try any existing room as anchor
+            all_targets = list(layouts.keys())
+            random.shuffle(all_targets)
+            for target in all_targets:
+                poly = _place_adjacent(layouts[target], w, h, layouts.values())
+                if poly:
+                    layouts[name] = poly
+                    print(f"  🩹 RECOVERED: {name} (Phase 6)")
+                    break
+
     return layouts
 
 def _validate_room_counts(spec, placed_rooms):

@@ -811,33 +811,23 @@ class ProximityLayoutGenerator:
             llm_total = ollama_data.get('total_area_sqm')
             if llm_total and llm_total > 10:
                 total_area = llm_total
-            used_area = sum(r['area'] for r in room_list)
         else:
             # Stage 1: Fast-path
             fast_path = self._try_fast_path(prompt)
             if fast_path:
                 room_list = fast_path
                 total_area = sum(r['area'] for r in room_list)
-                used_area = total_area
             else:
                 # Stage 2: BHK / Natural fallback
                 bhk = self._parse_bhk_shorthand(prompt, text_total_sqm)
                 if bhk:
                     room_list = bhk
                     total_area = text_total_sqm
-                    used_area = sum(r['area'] for r in room_list)
                 else:
-                    total_area, room_list, used_area, excluded_types = self.parse_natural_language(prompt)
+                    total_area, room_list, _, excluded_types = self.parse_natural_language(prompt)
 
-        # Smart Fallback: Ensure essentials are present for a 'home'
-        home_keywords = ['home', 'house', 'apartment', 'villa', 'bungalow', 'residence', 'layout', 'floorplan']
-        is_home_request = any(k in prompt.lower() for k in home_keywords)
-        
-        # If it's a home but missing key rooms OR very few rooms, expand.
-        has_living = any(r['type'] == 'living' for r in room_list)
-        if is_home_request and (not has_living or len(room_list) <= 1):
-            room_list = self._generate_default_home_layout(total_area, room_list)
-            used_area = sum(r['area'] for r in room_list)
+        # 3. Apply shared architectural logic (filling, essentials, scaling)
+        room_list = self.standardize_room_spec(room_list, total_area, prompt=prompt, excluded_types=excluded_types)
         
         # Expose basic metadata
         self.last_metadata = {
@@ -847,172 +837,109 @@ class ProximityLayoutGenerator:
             "adjacency_prefer": self.llm_adjacency["prefer"],
             "adjacency_avoid": self.llm_adjacency["avoid"]
         }
+        return room_list
         
-        # Validate and clamp areas
+    def standardize_room_spec(self, room_list: List[Dict], total_area: float, prompt: str = "", excluded_types: Set[str] = None) -> List[Dict]:
+        """
+        Consolidated architectural logic to ensure:
+        1. Essential rooms (Living, etc.) are present for home requests.
+        2. Minimum area constraints are met.
+        3. Remaining area is intelligently distributed to 'auto' or circulation rooms.
+        4. Final layout matches total_area exactly.
+        """
+        if excluded_types is None: excluded_types = set()
+        
+        # A. Smart Fallback for homes
+        home_keywords = ['home', 'house', 'apartment', 'villa', 'bungalow', 'residence', 'layout', 'floorplan']
+        is_home_request = any(k in prompt.lower() for k in home_keywords)
+        has_living = any(r['type'] == 'living' for r in room_list)
+        if is_home_request and (not has_living or len(room_list) <= 1):
+            room_list = self._generate_default_home_layout(total_area, room_list)
+
+        # B. Validate and clamp areas
         for room in room_list:
-            if not room['auto'] and room['area'] > 0:
+            if not room.get('auto', False) and room.get('area', 0) > 0:
                 min_area = self.min_areas.get(room['type'], 20)
                 if room['area'] < min_area:
                     print(f"[!] Warning: {room['type']} area {room['area']} too small. Clamping to {min_area}.")
                     room['area'] = min_area
 
-        # --- FILL MISSING ESSENTIALS ---
-        # We only force essentials: Living, Bedroom, Kitchen, Bathroom, Hallway
-        # Optional rooms (Storage, Balcony, etc.) are NOT added automatically unless mentioned
+        # C. Fill Missing Essentials (Living, Bedroom, Kitchen, Bathroom, Hallway)
         essential_types = ['living', 'bedroom', 'kitchen', 'bathroom', 'hallway']
         existing_types = {r['type'] for r in room_list}
-        
-        # NEW: Only auto-add essentials if user gave < 85% of total area explicitly
-        explicit_coverage = sum(r['area'] for r in room_list if not r['auto']) / total_area if total_area > 0 else 0
+        explicit_coverage = sum(r.get('area', 0) for r in room_list if not r.get('auto', False)) / total_area if total_area > 0 else 0
         AUTO_ADD_THRESHOLD = 0.85
         
-        missing_essentials = []
         if explicit_coverage < AUTO_ADD_THRESHOLD:
-            missing_essentials = [t for t in essential_types if t not in existing_types]
-        
-        # We process this BEFORE calculating remaining area so they get a share
-        if missing_essentials:
-            print(f"Auto-adding missing essentials: {missing_essentials} (coverage: {explicit_coverage:.1%})")
-            for t in missing_essentials:
-                # DO NOT ADD IF EXPLICITLY NEGATED
-                if t in excluded_types:
-                    print(f"Skipping essential {t} because it was negated.")
-                    continue
-                    
-                room_list.append({
-                    'type': t,
-                    'area': 0, # Will be filled by auto logic
-                    'auto': True
-                })
-        else:
-            print(f"Skipping auto-add of essentials (coverage: {explicit_coverage:.1%} ≥ {AUTO_ADD_THRESHOLD:.1%})")
-        # -------------------------------
+            missing = [t for t in essential_types if t not in existing_types]
+            for t in missing:
+                if t in excluded_types: continue
+                room_list.append({'type': t, 'area': 0, 'auto': True})
 
-        # Smart Filling Strategy
-        # 1. Update remaining area based on explicit rooms
-        used_area = sum(r['area'] for r in room_list if not r['auto'])
+        # D. Distribute Remaining Area
+        used_area = sum(r.get('area', 0) for r in room_list if not r.get('auto', False))
         remaining_area = max(0, total_area - used_area)
-        
-        print(f"Total: {total_area} | Explicit Used: {used_area} | Remaining: {remaining_area}")
-
-        # 2. Get list of auto rooms
-        auto_rooms = [r for r in room_list if r['auto']]
+        auto_rooms = [r for r in room_list if r.get('auto', False)]
         
         if auto_rooms:
             if remaining_area <= 0:
-                # No space left? Give them min areas, then we'll scale everything down
-                for r in auto_rooms:
-                    r['area'] = self.min_areas.get(r['type'], 5)
+                for r in auto_rooms: r['area'] = self.min_areas.get(r['type'], 5)
             else:
-                # Rule 3: Default distribution
-                DEFAULTS = {
-                    "living": 0.28,
-                    "bedroom": 0.31, # combined master (18) + bedroom (13)
-                    "kitchen": 0.12,
-                    "dining": 0.10,
-                    "bathroom": 0.08,
-                    "hallway": 0.07,
-                    "storage": 0.04
-                }
-                
-                # Rule 2: "bigger [room]" -> 1.5x default percentage
-                amplified_rooms = set()
+                DEFAULTS = {"living": 0.28, "bedroom": 0.31, "kitchen": 0.12, "dining": 0.10, "bathroom": 0.08, "hallway": 0.07, "storage": 0.04}
+                amplified = set()
+                # Simplified check for 'bigger [room]'
+                low_prompt = prompt.lower()
                 for t in self.room_types:
-                    for syn in self.synonym_map.get(t, [t]):
-                        if re.search(r'\b(bigger|larger|huge|massive|large)\s+' + re.escape(syn) + r'\b', prompt.lower()):
-                            amplified_rooms.add(t)
-                # Rule 27: "X should be bigger than Y" → amplify X
-                comp_re = re.compile(
-                    r'(\w[\w\s]{1,15}?)\s+(?:should\s+be\s+|must\s+be\s+)?'
-                    r'(?:bigger|larger|much\s+bigger|much\s+larger)\s+than',
-                    re.IGNORECASE
-                )
-                for cm in comp_re.finditer(prompt.lower()):
-                    t_big = self._resolve_room_type(cm.group(1).strip())
-                    if t_big:
-                        amplified_rooms.add(t_big)
+                    if any(x in low_prompt for x in [f"bigger {t}", f"large {t}", f"huge {t}"]): amplified.add(t)
                 
-                adjusted_defaults = {}
-                for t, pct in DEFAULTS.items():
-                    adjusted_defaults[t] = pct * 1.5 if t in amplified_rooms else pct
-                
-                # Count instances of each auto room type for equal splitting
                 type_counts = {}
-                for r in auto_rooms:
-                    type_counts[r['type']] = type_counts.get(r['type'], 0) + 1
+                for r in auto_rooms: type_counts[r['type']] = type_counts.get(r['type'], 0) + 1
                 
-                # Normalize percentages of unspecified rooms to sum to 1
                 total_pct = 0
                 for r in auto_rooms:
-                    base_ratio = adjusted_defaults.get(r['type'], 0.1)
-                    r_ratio = base_ratio / type_counts[r['type']]
-                    total_pct += r_ratio
+                    base = DEFAULTS.get(r['type'], 0.1) * (1.5 if r['type'] in amplified else 1.0)
+                    total_pct += base / type_counts[r['type']]
                 
                 if total_pct == 0: total_pct = 1
-                
-                # Distribute remaining
                 for r in auto_rooms:
-                    base_ratio = adjusted_defaults.get(r['type'], 0.1)
-                    r_ratio = base_ratio / type_counts[r['type']]
+                    r_ratio = (DEFAULTS.get(r['type'], 0.1) * (1.5 if r['type'] in amplified else 1.0)) / type_counts[r['type']]
                     share = (r_ratio / total_pct) * remaining_area
-                    
-                    # Rule 5: No single room > 35% of total area unless explicitly requested
-                    max_allowed = total_area * 0.35
-                    new_area = int(share)
-                    if new_area > max_allowed:
-                        new_area = int(max_allowed)
-                    
-                    r['area'] = max(self.min_areas.get(r['type'], 5), new_area)
-                    
-        # 3. Final Scaling to match Total Area exactly (only auto-assigned rooms)
-        current_total = sum(r['area'] for r in room_list)
+                    r['area'] = max(self.min_areas.get(r['type'], 5), int(min(share, total_area * 0.35)))
+
+        # E. Final Scaling to target (proportional)
+        current_total = sum(r.get('area', 0) for r in room_list)
         if current_total > 0 and abs(current_total - total_area) > 1:
-            # Separate explicit and auto-assigned rooms
-            explicit_total = sum(r['area'] for r in room_list if r.get('explicit_area', False))
+            explicit_total = sum(r.get('area', 0) for r in room_list if not r.get('auto', False))
             auto_total = current_total - explicit_total
-            
             if auto_total > 0:
-                remaining_budget = total_area - explicit_total
-                scale = remaining_budget / auto_total if auto_total > 0 else 1.0
-                # Rule 26: guard negative or absurd scale
-                if scale <= 0 or scale > 5.0:
-                    scale = max(0.1, min(5.0, scale))
-                print(f"Scaling auto-assigned rooms by {scale:.2f} to fit {total_area} (explicit: {explicit_total}, auto: {auto_total})")
+                scale = (total_area - explicit_total) / auto_total
+                scale = max(0.1, min(5.0, scale))
                 for r in room_list:
-                    if not r.get('explicit_area', False):
-                        r['area'] = max(self.min_areas.get(r['type'], 5), round(r['area'] * scale, 1))
+                    if r.get('auto', False): r['area'] = max(self.min_areas.get(r['type'], 5), round(r['area'] * scale, 1))
             else:
-                # All rooms are explicit, but they don't sum to target? Proportional scale all of them.
                 scale = total_area / current_total
-                print(f"Proportional scaling all {len(room_list)} rooms by {scale:.2f} to hit target {total_area}")
-                for r in room_list:
-                    r['area'] = max(self.min_areas.get(r['type'], 5), round(r['area'] * scale, 1))
-        
-        # 4. Final Remainder Adjustment (to be pixel-perfect)
-        final_total = sum(r['area'] for r in room_list)
+                for r in room_list: r['area'] = max(self.min_areas.get(r['type'], 5), round(r['area'] * scale, 1))
+
+        # F. Pixel-perfect pixel correction
+        final_total = sum(r.get('area', 0) for r in room_list)
         diff = total_area - final_total
         if abs(diff) > 0.1 and room_list:
-            # Add/subtract the tiny difference to the largest room to match target perfectly
-            room_list.sort(key=lambda x: x['area'], reverse=True)
+            room_list.sort(key=lambda x: x.get('area', 0), reverse=True)
             room_list[0]['area'] = round(room_list[0]['area'] + diff, 1)
-            print(f"Adjusted largest room '{room_list[0]['name']}' by {diff:.2f} to hit {total_area} exactly.")
 
-        # Rule 17: if total still way over budget, proportionally scale all down
-        final_total_check = sum(r['area'] for r in room_list)
-        if final_total_check > total_area * 1.5:
-            s = total_area / final_total
-            for r in room_list:
-                r['area'] = max(self.min_areas.get(r['type'], 4), int(r['area'] * s))
-
-        # Rule 11: final naming pass — every room gets instance + name
-        type_final: Dict[str, int] = {}
-        for r in room_list:
-            type_final[r['type']] = type_final.get(r['type'], 0) + 1
-        type_cur2: Dict[str, int] = {}
+        # Final Naming Pass
+        type_final = {}
+        for r in room_list: type_final[r['type']] = type_final.get(r['type'], 0) + 1
+        type_cur = {}
         for r in room_list:
             t = r['type']
-            type_cur2[t] = type_cur2.get(t, 0) + 1
-            r['instance'] = type_cur2[t]
-            r['name'] = f"{t}_{type_cur2[t]}" if type_final[t] > 1 else t
+            type_cur[t] = type_cur.get(t, 0) + 1
+            r['instance'] = type_cur[t]
+            r['name'] = f"{t}_{type_cur[t]}" if type_final[t] > 1 else t
+            r['auto'] = r.get('auto', False) # ensure key exists
+            # Ensure requested_area_sqft is set for all rooms
+            r['requested_area_sqft'] = int(r['area'] * 10.764)
+
+        return room_list
 
         return room_list

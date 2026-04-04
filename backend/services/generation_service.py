@@ -41,22 +41,42 @@ class GenerationService:
             SQM_PER_SQFT = 0.092903  # Standard conversion factor
 
             if rooms_spec:
-                # Bypass: Use structured rooms_spec directly from UI.
-                # The frontend always sends areas in sqft (it normalises sqm→sqft before
-                # sending). The synthesizer works internally in sqm. We convert here.
-                spec = {"rooms": []}
-                for room in rooms_spec:
-                    if room.get("type") and room.get("area"):
-                        area_sqft = float(room["area"])
-                        area_sqm  = area_sqft * SQM_PER_SQFT  # e.g. 200 sqft → 18.58 sqm
-                        spec["rooms"].append({
-                            "type":                room["type"].strip().lower(),
-                            "area":                area_sqm,          # synthesizer works in sqm
-                            "requested_area_sqft": int(area_sqft),    # original user value for fidelity display
+                # 1a. Detect Total Area from Frontend prompt (e.g., "A house with 1000 sqft...")
+                import re
+                total_area_sqm = 100.0 # fallback
+                match = re.search(r'total area of around (\d+(?:\.\d+)?)\s*sq(ft|m)', prompt.lower())
+                if match:
+                    val = float(match.group(1))
+                    unit = match.group(2)
+                    total_area_sqm = val * SQM_PER_SQFT if unit == 'ft' else val
+                
+                # 1b. Convert manual spec to internal room_list
+                room_list = []
+                for r in rooms_spec:
+                    if r.get("type") and r.get("area"):
+                        # Frontend sends sqft in manual mode
+                        room_list.append({
+                            "type": r["type"].strip().lower(),
+                            "area": float(r["area"]) * SQM_PER_SQFT,
+                            "auto": False
                         })
-                logger.info(f"Spec-driven mode: {len(spec['rooms'])} rooms (sqft→sqm conversion applied)")
+                
+                # 1c. Standardize (fill missing essentials, distribute remaining area)
+                standardized = self.architect.standardize_room_spec(room_list, total_area_sqm, prompt=prompt)
+                
+                spec = {"rooms": []}
+                for r in standardized:
+                    spec["rooms"].append({
+                        "type": r["type"],
+                        "area": r["area"],
+                        "name": r.get("name", r["type"]),
+                        "instance": r.get("instance", 1),
+                        "requested_area_sqft": r.get("requested_area_sqft")
+                    })
+                logger.info(f"Manual mode standardized: {len(spec['rooms'])} rooms ({total_area_sqm:.1f} total sqm)")
             else:
                 # Original path: Parse from text prompt
+                # Note: generate_blueprint already calls standardize_room_spec internally
                 rooms = await loop.run_in_executor(None, self.architect.generate_blueprint, prompt)
                 
                 if not rooms:
