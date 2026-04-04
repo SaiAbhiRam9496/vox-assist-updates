@@ -206,15 +206,15 @@ class ProximityLayoutGenerator:
         return text[start:end], start
 
     def _parse_count(self, context, room_word):
-        """Parse count from local context."""
-        # Check digit: "2 bedrooms"
-        digit_match = re.search(rf'(\d+)\s*{re.escape(room_word)}', context, re.IGNORECASE)
+        """Parse count from local context. e.g. '3 bedrooms', 'two baths'"""
+        # Improved regex to handle '3x', '3 ', etc.
+        digit_match = re.search(rf'(\d+)\s*(?:x|nos?\.?\s+)?{re.escape(room_word)}', context, re.IGNORECASE)
         if digit_match:
             return int(digit_match.group(1))
         
         # Check word: "two bedrooms"
         for word, num in self.word_to_num.items():
-            if re.search(rf'\b{word}\s+{re.escape(room_word)}', context, re.IGNORECASE):
+            if re.search(rf'\b{word}\s+(?:x|nos?\.?\s+)?{re.escape(room_word)}', context, re.IGNORECASE):
                 return num
         return 1
 
@@ -680,10 +680,10 @@ class ProximityLayoutGenerator:
             "  - \"adjacency_avoid\": List of pairs of room types to be far.\n\n"
             "Rules:\n"
             "1. Canonical types: living, bedroom, kitchen, bathroom, balcony, storage, study, dining, hallway, garden, parking, meditation, gym, yoga.\n"
-            "2. If the user asks for '2 bedrooms', output TWO separate 'bedroom' objects in the list.\n"
+            "2. If the user asks for '3 bedrooms', output THREE separate 'bedroom' objects in the list. This is CRITICAL.\n"
             "3. If areas are in sqft, convert to sqm (val * 0.092903).\n"
-            "4. Be thorough: extract EVERY room mentioned (e.g. guest bedroom, master bed, study, balcony, meditation).\n"
-            "5. If a 'home' or 'house' is requested but most standard rooms are missing, INFER them (e.g. at least one living, bedroom, kitchen, and bathroom).\n"
+            "4. Be thorough: extract EVERY room mentioned. Count words like 'two', 'three', 'pair of' as quantities.\n"
+            "5. If a 'home' or 'house' is requested but key rooms like 'living' are missing, ALWAYS INFER THEM.\n"
             "6. Return ONLY JSON."
         )
 
@@ -829,10 +829,13 @@ class ProximityLayoutGenerator:
                 else:
                     total_area, room_list, used_area, excluded_types = self.parse_natural_language(prompt)
 
-        # Smart Fallback: If we have very few rooms and it's a "home" or "house", 
-        # expand with standard essentials so we don't return an empty box.
+        # Smart Fallback: Ensure essentials are present for a 'home'
         home_keywords = ['home', 'house', 'apartment', 'villa', 'bungalow', 'residence', 'layout', 'floorplan']
-        if len(room_list) <= 1 and any(k in prompt.lower() for k in home_keywords):
+        is_home_request = any(k in prompt.lower() for k in home_keywords)
+        
+        # If it's a home but missing key rooms OR very few rooms, expand.
+        has_living = any(r['type'] == 'living' for r in room_list)
+        if is_home_request and (not has_living or len(room_list) <= 1):
             room_list = self._generate_default_home_layout(total_area, room_list)
             used_area = sum(r['area'] for r in room_list)
         
